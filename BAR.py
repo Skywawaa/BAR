@@ -25,7 +25,6 @@ K_BACKUP_NOW = "backup_now"
 K_STATUS = "status_text"
 K_RESTORE_LOCAL_PATH = "restore_local_path"
 K_RESTORE_LOCAL_BTN = "restore_local_btn"
-K_RESTORE_ASSETS_DIR = "restore_assets_dir"
 EXTERNAL_ASSETS_DIR = "external-assets"
 EXTERNAL_ASSETS_MANIFEST_FILE = "external-assets.json"
 EXTERNAL_ASSETS_MANIFEST_VERSION = 1
@@ -131,22 +130,36 @@ def make_backup_folder_name():
     return f"obs-config-{hostname()}-{now_stamp()}"
 
 
-def create_local_backup_folder(base_dir: Path, include_logs: bool, include_cache: bool) -> Path:
-    cfg = get_obs_config_dir()
+def create_local_backup_zip(base_dir: Path, include_logs: bool, include_cache: bool) -> Path:
     base_dir.mkdir(parents=True, exist_ok=True)
-    backup_root = base_dir / make_backup_folder_name()
-    target_root = backup_root / "obs-studio"
-    for rel, src in iter_obs_files(include_logs, include_cache):
-        dest = target_root / rel
-        ensure_parent(dest)
-        with open(src, "rb") as f:
-            data = f.read()
-        data = _strip_stream_key(rel, data)
-        with open(dest, "wb") as f:
-            f.write(data)
-    external_assets = collect_external_assets(include_logs, include_cache)
-    write_external_assets_backup(backup_root, external_assets)
-    return backup_root
+    folder_name = make_backup_folder_name()
+    zip_path = base_dir / f"{folder_name}.zip"
+    with zipfile.ZipFile(str(zip_path), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for rel, src in iter_obs_files(include_logs, include_cache):
+            with open(src, "rb") as f:
+                data = f.read()
+            data = _strip_stream_key(rel, data)
+            zf.writestr(f"{folder_name}/obs-studio/{rel}", data)
+        external_assets = collect_external_assets(include_logs, include_cache)
+        if external_assets:
+            manifest = []
+            for asset in external_assets:
+                backup_rel_path = asset["backup_path"]
+                try:
+                    with open(asset["source_path"], "rb") as f:
+                        zf.writestr(f"{folder_name}/{backup_rel_path}", f.read())
+                    manifest.append({
+                        "original_path": asset["original_path"],
+                        "backup_path": backup_rel_path,
+                    })
+                except Exception as e:
+                    warn(f"Could not include external asset {asset['source_path']}: {e}")
+            manifest_json = json.dumps(
+                {"version": EXTERNAL_ASSETS_MANIFEST_VERSION, "source_host": hostname(), "files": manifest},
+                indent=2,
+            )
+            zf.writestr(f"{folder_name}/{EXTERNAL_ASSETS_MANIFEST_FILE}", manifest_json)
+    return zip_path
 
 
 def _is_relative_to(path: Path, other: Path) -> bool:
@@ -474,7 +487,6 @@ def _settings_from_shadow():
         obs.obs_data_set_string(s, K_LOCAL_DIR, g_get_str(K_LOCAL_DIR, str(Path.home() / "obs-backups")))
         obs.obs_data_set_bool(s, K_INCLUDE_LOGS, g_get_bool(K_INCLUDE_LOGS, False))
         obs.obs_data_set_bool(s, K_INCLUDE_CACHE, g_get_bool(K_INCLUDE_CACHE, False))
-        obs.obs_data_set_string(s, K_RESTORE_ASSETS_DIR, g_get_str(K_RESTORE_ASSETS_DIR, str(Path.home() / "obs-restored-assets")))
         return s
     except Exception:
         return obs.obs_data_create()
@@ -491,8 +503,8 @@ def do_backup_now(props=None, prop=None):
 
         target_dir = Path(g_get_str(K_LOCAL_DIR, str(Path.home() / "obs-backups")))
         info(f"Creating local backup in {target_dir}")
-        backup_root = create_local_backup_folder(target_dir, include_logs, include_cache)
-        info(f"Backup created: {backup_root}")
+        zip_path = create_local_backup_zip(target_dir, include_logs, include_cache)
+        info(f"Backup created: {zip_path}")
         return True
     except Exception as e:
         err(f"Backup failed: {e}")
@@ -534,10 +546,7 @@ def _extract_zip_to_config(zip_file_path: Path):
             else:
                 ensure_parent(dest)
                 shutil.copy2(str(item), str(dest))
-        path_mapping = _restore_external_assets_from_backup_root(
-            backup_container_root,
-            Path(g_get_str(K_RESTORE_ASSETS_DIR, str(Path.home() / "obs-restored-assets"))),
-        )
+        path_mapping = _restore_external_assets_from_backup_root(backup_container_root)
         if path_mapping:
             _repath_obs_json_files(cfg, path_mapping)
 
@@ -611,10 +620,7 @@ def _restore_from_folder(folder: Path):
             with open(p, "rb") as f:
                 pairs.append((rel, f.read()))
     _restore_pairs_to_config(pairs)
-    path_mapping = _restore_external_assets_from_backup_root(
-        backup_root,
-        Path(g_get_str(K_RESTORE_ASSETS_DIR, str(Path.home() / "obs-restored-assets"))),
-    )
+    path_mapping = _restore_external_assets_from_backup_root(backup_root)
     if path_mapping:
         _repath_obs_json_files(get_obs_config_dir(), path_mapping)
 
@@ -623,14 +629,13 @@ def do_restore_local(props=None, prop=None):
     try:
         path = g_get_str(K_RESTORE_LOCAL_PATH)
         if not path:
-            raise RuntimeError("Select a backup folder or a .zip.")
+            raise RuntimeError("Select a .zip backup file.")
         p = Path(path)
         if not p.exists():
-            raise RuntimeError("Path not found.")
-        if p.is_file() and p.suffix.lower() == ".zip":
-            _extract_zip_to_config(p)
-        else:
-            _restore_from_folder(p)
+            raise RuntimeError("File not found.")
+        if not p.is_file() or p.suffix.lower() != ".zip":
+            raise RuntimeError("Please select a valid .zip backup file.")
+        _extract_zip_to_config(p)
         info("Local restore complete. Restart OBS to fully apply.")
         return True
     except Exception as e:
@@ -672,10 +677,8 @@ def script_properties():
 
     obs.obs_properties_add_button(props, K_BACKUP_NOW, "Backup now", do_backup_now)
 
-    obs.obs_properties_add_path(props, K_RESTORE_LOCAL_PATH, "Backup folder/zip (local)", obs.OBS_PATH_DIRECTORY, "", str(Path.home()))
-    obs.obs_properties_add_button(props, K_RESTORE_LOCAL_BTN, "Restore from local folder", do_restore_local)
-
-    obs.obs_properties_add_path(props, K_RESTORE_ASSETS_DIR, "Restored assets folder (cross-PC)", obs.OBS_PATH_DIRECTORY, "", str(Path.home()))
+    obs.obs_properties_add_path(props, K_RESTORE_LOCAL_PATH, "Backup zip file", obs.OBS_PATH_FILE, "ZIP Files (*.zip)", str(Path.home()))
+    obs.obs_properties_add_button(props, K_RESTORE_LOCAL_BTN, "Restore from zip", do_restore_local)
 
     g_props = props
     return props
@@ -685,7 +688,6 @@ def script_defaults(settings):
     obs.obs_data_set_default_string(settings, K_LOCAL_DIR, str(Path.home() / "obs-backups"))
     obs.obs_data_set_default_bool(settings, K_INCLUDE_LOGS, False)
     obs.obs_data_set_default_bool(settings, K_INCLUDE_CACHE, False)
-    obs.obs_data_set_default_string(settings, K_RESTORE_ASSETS_DIR, str(Path.home() / "obs-restored-assets"))
 
 
 def script_update(settings):
@@ -693,7 +695,6 @@ def script_update(settings):
     g_set(K_INCLUDE_LOGS, obs.obs_data_get_bool(settings, K_INCLUDE_LOGS))
     g_set(K_INCLUDE_CACHE, obs.obs_data_get_bool(settings, K_INCLUDE_CACHE))
     g_set(K_RESTORE_LOCAL_PATH, obs.obs_data_get_string(settings, K_RESTORE_LOCAL_PATH))
-    g_set(K_RESTORE_ASSETS_DIR, obs.obs_data_get_string(settings, K_RESTORE_ASSETS_DIR))
 
 
 def script_load(settings):
