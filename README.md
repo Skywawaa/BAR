@@ -7,6 +7,16 @@ By default, logs are excluded unless `Include logs` is enabled. Cache folders, c
 
 For GitHub backups, very large external assets are skipped to stay within practical upload limits of the GitHub contents API.
 
+## Stream key protection
+
+The stream key stored in `basic/service.json` (Twitch, YouTube, Kick, etc.) is **automatically stripped** from every backup — both local and GitHub. The backup file never contains your stream key. When you restore on a new PC, simply re-enter your key in OBS Settings → Stream.
+
+## Automatic re-pathing on restore
+
+When restoring a backup created on a different PC or a different operating system (e.g. Windows → Linux), absolute paths embedded in scene JSON files (overlays, videos, fonts, browser sources…) are **automatically rewritten** to point to where the assets were actually placed on the new machine.
+
+Assets whose original path is incompatible with the current OS are placed under the **Restored assets folder** (configurable in the script settings, defaults to `~/obs-restored-assets`), and all references in the JSON files are updated accordingly.
+
 > [!IMPORTANT]
 > Python 3.13+ is recommended to use this script
 

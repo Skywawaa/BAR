@@ -38,6 +38,7 @@ K_RESTORE_LOCAL_BTN = "restore_local_btn"
 K_REMOTE_REFRESH = "remote_refresh"
 K_REMOTE_SELECT = "remote_select"
 K_RESTORE_REMOTE_BTN = "restore_remote_btn"
+K_RESTORE_ASSETS_DIR = "restore_assets_dir"
 EXTERNAL_ASSETS_DIR = "external-assets"
 EXTERNAL_ASSETS_MANIFEST_FILE = "external-assets.json"
 EXTERNAL_ASSETS_MANIFEST_VERSION = 1
@@ -153,7 +154,11 @@ def create_local_backup_folder(base_dir: Path, include_logs: bool, include_cache
     for rel, src in iter_obs_files(include_logs, include_cache):
         dest = target_root / rel
         ensure_parent(dest)
-        shutil.copy2(str(src), str(dest))
+        with open(src, "rb") as f:
+            data = f.read()
+        data = _strip_stream_key(rel, data)
+        with open(dest, "wb") as f:
+            f.write(data)
     external_assets = collect_external_assets(include_logs, include_cache)
     write_external_assets_backup(backup_root, external_assets)
     return backup_root
@@ -295,20 +300,127 @@ def _target_path_from_manifest(original_path: str):
     return p
 
 
-def _restore_external_assets_from_backup_root(backup_root: Path):
+def _needs_repath(original_path: str) -> bool:
+    """Return True if original_path is incompatible with the current OS (cross-platform restore)."""
+    if sys.platform.startswith("win"):
+        return original_path.startswith("/") and not _looks_like_windows_absolute_path(original_path)
+    return _looks_like_windows_absolute_path(original_path)
+
+
+def _fallback_asset_path(original_path: str, restore_dir: Path) -> Path:
+    """Compute a mirrored path under restore_dir for an asset that cannot use its original location."""
+    if _looks_like_windows_absolute_path(original_path):
+        if original_path.startswith("\\\\"):
+            parts = [p for p in re.split(r"[\\/]+", original_path.lstrip("\\")) if p]
+        else:
+            pure = PureWindowsPath(original_path)
+            drive = (pure.drive or "drive").replace(":", "")
+            parts = [drive] + [p for p in pure.parts[1:] if p not in ("\\", "/")]
+    else:
+        parts = [p for p in Path(original_path).parts if p != "/"]
+    result = restore_dir
+    for part in parts:
+        result /= part
+    return result
+
+
+def _path_to_file_url(path_str: str) -> str:
+    """Convert an absolute path string to a file:// URL."""
+    try:
+        return Path(path_str).as_uri()
+    except Exception:
+        clean = path_str.replace("\\", "/")
+        if not clean.startswith("/"):
+            clean = "/" + clean
+        return "file://" + parse.quote(clean)
+
+
+def _repath_obs_json_files(obs_config_dir: Path, path_mapping: dict):
+    """Rewrite absolute paths in all OBS JSON config files based on path_mapping.
+
+    path_mapping maps original_path -> new_actual_path (both plain strings).
+    Handles plain paths, Windows backslash-escaped paths, and file:// URL variants.
+    """
+    if not path_mapping:
+        return
+    replacements = []
+    for old_path, new_path in path_mapping.items():
+        old_json = json.dumps(old_path)[1:-1]
+        new_json = json.dumps(new_path)[1:-1]
+        replacements.append((old_json, new_json))
+        old_url = _path_to_file_url(old_path)
+        new_url = _path_to_file_url(new_path)
+        old_url_json = json.dumps(old_url)[1:-1]
+        new_url_json = json.dumps(new_url)[1:-1]
+        if old_url_json != old_json:
+            replacements.append((old_url_json, new_url_json))
+        if _looks_like_windows_absolute_path(old_path):
+            old_fwd = old_path.replace("\\", "/")
+            new_fwd = new_path.replace("\\", "/")
+            old_fwd_json = json.dumps(old_fwd)[1:-1]
+            new_fwd_json = json.dumps(new_fwd)[1:-1]
+            if old_fwd_json not in (old_json, old_url_json):
+                replacements.append((old_fwd_json, new_fwd_json))
+    repathed = 0
+    for json_file in obs_config_dir.rglob("*.json"):
+        try:
+            text = json_file.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        modified = text
+        for old_str, new_str in replacements:
+            if old_str in modified:
+                modified = modified.replace(old_str, new_str)
+        if modified != text:
+            try:
+                json_file.write_text(modified, encoding="utf-8")
+                repathed += 1
+            except Exception as e:
+                warn(f"Could not rewrite paths in {json_file}: {e}")
+    if repathed > 0:
+        info(f"Auto re-pathed {repathed} JSON file(s).")
+
+
+def _strip_stream_key(rel_path: str, data_bytes: bytes) -> bytes:
+    """Strip the stream key from service.json backup data so it is never stored."""
+    if rel_path.replace("\\", "/") != "basic/service.json":
+        return data_bytes
+    try:
+        obj = json.loads(data_bytes.decode("utf-8"))
+        if isinstance(obj, dict):
+            settings = obj.get("settings")
+            if isinstance(settings, dict) and "key" in settings:
+                del settings["key"]
+                info("Stream key stripped from service.json backup.")
+                return json.dumps(obj, indent=4, ensure_ascii=False).encode("utf-8")
+    except Exception as e:
+        warn(f"Could not strip stream key from service.json: {e}")
+    return data_bytes
+
+
+def _restore_external_assets_from_backup_root(backup_root: Path, restore_assets_dir: Path = None) -> dict:
+    """Restore external assets from backup and return a mapping of original_path -> actual_restored_path.
+
+    When the original path is incompatible with the current OS, assets are placed under
+    restore_assets_dir (defaults to ~/obs-restored-assets) and the mapping is populated
+    so that JSON config files can be re-pathed afterwards.
+    """
     manifest_path = backup_root / EXTERNAL_ASSETS_MANIFEST_FILE
     if not manifest_path.exists():
-        return
+        return {}
     try:
         with open(manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
     except Exception as e:
         warn(f"Unable to read external assets manifest: {e}")
-        return
+        return {}
     source_host = manifest.get("source_host")
     current_host = hostname()
     if source_host and source_host != current_host:
-        warn(f"External asset restore is running on host '{current_host}', but the backup was created on host '{source_host}'. Original paths may not exist on this machine.")
+        warn(f"External asset restore is running on host '{current_host}', but the backup was created on host '{source_host}'. Paths may differ between machines.")
+    if restore_assets_dir is None:
+        restore_assets_dir = Path.home() / "obs-restored-assets"
+    path_mapping = {}
     for asset in manifest.get("files", []):
         original_path = asset.get("original_path", "")
         backup_path = asset.get("backup_path", "")
@@ -318,12 +430,17 @@ def _restore_external_assets_from_backup_root(backup_root: Path):
         if not src.exists() or not src.is_file():
             warn(f"Missing external asset in backup: {backup_path}")
             continue
-        dest = _target_path_from_manifest(original_path)
-        if dest is None:
-            warn(f"Skipping external asset for incompatible path: {original_path}")
-            continue
+        if _needs_repath(original_path):
+            dest = _fallback_asset_path(original_path, restore_assets_dir)
+            path_mapping[original_path] = str(dest)
+        else:
+            dest = _target_path_from_manifest(original_path)
+            if dest is None:
+                dest = _fallback_asset_path(original_path, restore_assets_dir)
+                path_mapping[original_path] = str(dest)
         ensure_parent(dest)
         shutil.copy2(str(src), str(dest))
+    return path_mapping
 
 
 def g_get(settings_key, default=None):
@@ -379,6 +496,7 @@ def _settings_from_shadow():
         obs.obs_data_set_string(s, K_GH_REPO_SELECT, g_get_str(K_GH_REPO_SELECT, ""))
         obs.obs_data_set_string(s, K_GH_BRANCH, g_get_str(K_GH_BRANCH, "main"))
         obs.obs_data_set_string(s, K_GH_FOLDER, g_get_str(K_GH_FOLDER, "obs-backups"))
+        obs.obs_data_set_string(s, K_RESTORE_ASSETS_DIR, g_get_str(K_RESTORE_ASSETS_DIR, str(Path.home() / "obs-restored-assets")))
         return s
     except Exception:
         return obs.obs_data_create()
@@ -518,6 +636,7 @@ def do_backup_now(props=None, prop=None):
                 repo_path = _gh_join(base_in_repo, rel)
                 with open(src, "rb") as f:
                     data = f.read()
+                data = _strip_stream_key(rel, data)
                 client.put_file(repo, branch, repo_path, data, message=f"OBS backup {backup_name}: {rel}")
                 count += 1
                 if count % 50 == 0:
@@ -614,7 +733,12 @@ def _extract_zip_to_config(zip_file_path: Path):
             else:
                 ensure_parent(dest)
                 shutil.copy2(str(item), str(dest))
-        _restore_external_assets_from_backup_root(backup_container_root)
+        path_mapping = _restore_external_assets_from_backup_root(
+            backup_container_root,
+            Path(g_get_str(K_RESTORE_ASSETS_DIR, str(Path.home() / "obs-restored-assets"))),
+        )
+        if path_mapping:
+            _repath_obs_json_files(cfg, path_mapping)
 
 
 def _backup_current_config():
@@ -686,7 +810,12 @@ def _restore_from_folder(folder: Path):
             with open(p, "rb") as f:
                 pairs.append((rel, f.read()))
     _restore_pairs_to_config(pairs)
-    _restore_external_assets_from_backup_root(backup_root)
+    path_mapping = _restore_external_assets_from_backup_root(
+        backup_root,
+        Path(g_get_str(K_RESTORE_ASSETS_DIR, str(Path.home() / "obs-restored-assets"))),
+    )
+    if path_mapping:
+        _repath_obs_json_files(get_obs_config_dir(), path_mapping)
 
 
 def do_restore_local(props=None, prop=None):
@@ -761,7 +890,12 @@ def do_restore_remote(props=None, prop=None):
                         f.write(base64.b64decode(asset_b64))
                 with open(backup_root / EXTERNAL_ASSETS_MANIFEST_FILE, "w", encoding="utf-8") as f:
                     json.dump(manifest, f)
-                _restore_external_assets_from_backup_root(backup_root)
+                path_mapping = _restore_external_assets_from_backup_root(
+                    backup_root,
+                    Path(g_get_str(K_RESTORE_ASSETS_DIR, str(Path.home() / "obs-restored-assets"))),
+                )
+                if path_mapping:
+                    _repath_obs_json_files(get_obs_config_dir(), path_mapping)
         except Exception as e:
             warn(f"Unable to restore external assets from remote backup: {e}")
         info("Remote restore complete. Restart OBS.")
@@ -901,6 +1035,8 @@ def script_properties():
     obs.obs_properties_add_list(props, K_REMOTE_SELECT, "Remote backup", obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_STRING)
     obs.obs_properties_add_button(props, K_RESTORE_REMOTE_BTN, "Restore from GitHub", do_restore_remote)
 
+    obs.obs_properties_add_path(props, K_RESTORE_ASSETS_DIR, "Restored assets folder (cross-PC)", obs.OBS_PATH_DIRECTORY, "", str(Path.home()))
+
     g_props = props
     try:
         tmp = _settings_from_shadow()
@@ -919,6 +1055,7 @@ def script_defaults(settings):
     obs.obs_data_set_default_string(settings, K_GH_BRANCH, "main")
     obs.obs_data_set_default_string(settings, K_GH_FOLDER, "obs-backups")
     obs.obs_data_set_default_string(settings, K_GH_REPO_SELECT, "")
+    obs.obs_data_set_default_string(settings, K_RESTORE_ASSETS_DIR, str(Path.home() / "obs-restored-assets"))
 
 
 def script_update(settings):
@@ -931,6 +1068,7 @@ def script_update(settings):
     g_set(K_GH_BRANCH, obs.obs_data_get_string(settings, K_GH_BRANCH))
     g_set(K_GH_FOLDER, obs.obs_data_get_string(settings, K_GH_FOLDER))
     g_set(K_RESTORE_LOCAL_PATH, obs.obs_data_get_string(settings, K_RESTORE_LOCAL_PATH))
+    g_set(K_RESTORE_ASSETS_DIR, obs.obs_data_get_string(settings, K_RESTORE_ASSETS_DIR))
 
     if g_props is not None:
         _refresh_visibility(g_props, settings)
