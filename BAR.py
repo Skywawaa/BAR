@@ -734,6 +734,7 @@ def do_restore_remote(props=None, prop=None):
 def script_description():
     return (
         "OBS Backup And Restore script can restore or backup from a local folder or from GitHub. (you will need token for GitHub backup/restore)\n"
+        "External source files referenced by OBS scene/config JSON files are also included when accessible on disk.\n"
         "If you choose GitHub, you can restore a existing backup from a GitHub repo, so you will need to fetch present backups to select one.\n"
         "NOTE: you need to fetch accessible GitHub repos after entering a token to select one.\n\n"
         "BAR by celestial04_"

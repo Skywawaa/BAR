@@ -1,6 +1,10 @@
 # Backup And Restore (BAR)
 This is a simple script write in Python for OBS Studio for backup and restore your OBS Studio files. You can use this script for backup and restore from your local disk or a private GitHub repo.
 
+The backup includes the OBS `obs-studio` config folder and also external source files referenced from JSON scene/config files when they are accessible on disk (for example overlays, images, videos, and other local media files used by sources).
+
+By default, logs are excluded unless `Include logs` is enabled. Cache folders, crash dumps, temporary files, and lock files are still excluded.
+
 > [!IMPORTANT]
 > Python 3.13+ is recommended to use this script
 
