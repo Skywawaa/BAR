@@ -211,16 +211,15 @@ def _backup_rel_for_external_asset(path: Path) -> str:
     """Map an absolute asset path to a stable backup-relative path."""
     raw = str(path)
     if _looks_like_windows_absolute_path(raw):
+        flat = _windows_path_flat_parts(raw)
         if raw.startswith("\\\\"):
-            unc_parts = [p for p in re.split(r"[\\/]+", raw.lstrip("\\")) if p]
-            server = unc_parts[0] if len(unc_parts) > 0 else "unc"
-            share = unc_parts[1] if len(unc_parts) > 1 else "share"
-            parts = unc_parts[2:]
+            server = flat[0] if len(flat) > 0 else "unc"
+            share = flat[1] if len(flat) > 1 else "share"
+            parts = flat[2:]
             rel = Path(EXTERNAL_ASSETS_DIR) / "windows-unc" / server / share
         else:
-            pure = PureWindowsPath(raw)
-            drive = (pure.drive or "drive").replace(":", "")
-            parts = [p for p in pure.parts[1:] if p not in ("\\", "/")]
+            drive = flat[0] if flat else "drive"
+            parts = flat[1:]
             rel = Path(EXTERNAL_ASSETS_DIR) / "windows" / drive
         for part in parts:
             rel /= part
@@ -300,6 +299,21 @@ def _target_path_from_manifest(original_path: str):
     return p
 
 
+def _windows_path_flat_parts(raw: str) -> list:
+    """Return all path components of a Windows absolute path as a flat list.
+
+    For a drive path like ``C:\\Users\\Alice\\file.png`` this returns
+    ``['C', 'Users', 'Alice', 'file.png']``.  For a UNC path like
+    ``\\\\server\\share\\file.png`` it returns
+    ``['server', 'share', 'file.png']``.
+    """
+    if raw.startswith("\\\\"):
+        return [p for p in re.split(r"[\\/]+", raw.lstrip("\\")) if p]
+    pure = PureWindowsPath(raw)
+    drive = (pure.drive or "drive").replace(":", "")
+    return [drive] + [p for p in pure.parts[1:] if p not in ("\\", "/")]
+
+
 def _needs_repath(original_path: str) -> bool:
     """Return True if original_path is incompatible with the current OS (cross-platform restore)."""
     if sys.platform.startswith("win"):
@@ -310,12 +324,7 @@ def _needs_repath(original_path: str) -> bool:
 def _fallback_asset_path(original_path: str, restore_dir: Path) -> Path:
     """Compute a mirrored path under restore_dir for an asset that cannot use its original location."""
     if _looks_like_windows_absolute_path(original_path):
-        if original_path.startswith("\\\\"):
-            parts = [p for p in re.split(r"[\\/]+", original_path.lstrip("\\")) if p]
-        else:
-            pure = PureWindowsPath(original_path)
-            drive = (pure.drive or "drive").replace(":", "")
-            parts = [drive] + [p for p in pure.parts[1:] if p not in ("\\", "/")]
+        parts = _windows_path_flat_parts(original_path)
     else:
         parts = [p for p in Path(original_path).parts if p != "/"]
     result = restore_dir
