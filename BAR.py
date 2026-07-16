@@ -13,7 +13,9 @@ import base64
 import tempfile
 import zipfile
 import shutil
+import re
 from pathlib import Path
+from pathlib import PureWindowsPath
 from urllib import request, parse, error
 
 g_props = None
@@ -36,6 +38,8 @@ K_RESTORE_LOCAL_BTN = "restore_local_btn"
 K_REMOTE_REFRESH = "remote_refresh"
 K_REMOTE_SELECT = "remote_select"
 K_RESTORE_REMOTE_BTN = "restore_remote_btn"
+EXTERNAL_ASSETS_DIR = "external-assets"
+EXTERNAL_ASSETS_MANIFEST = "external-assets.json"
 
 def _log(level, msg):
     try:
@@ -146,7 +150,156 @@ def create_local_backup_folder(base_dir: Path, include_logs: bool, include_cache
         dest = target_root / rel
         ensure_parent(dest)
         shutil.copy2(str(src), str(dest))
+    external_assets = collect_external_assets(include_logs, include_cache)
+    write_external_assets_backup(backup_root, external_assets)
     return backup_root
+
+
+def _is_relative_to(path: Path, other: Path) -> bool:
+    try:
+        path.relative_to(other)
+        return True
+    except ValueError:
+        return False
+
+
+def _iter_nested_strings(value):
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from _iter_nested_strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_nested_strings(child)
+    elif isinstance(value, str):
+        yield value
+
+
+def _looks_like_windows_absolute_path(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", value)) or value.startswith("\\\\")
+
+
+def _normalize_asset_path(raw_value: str):
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+    if value.startswith("file://"):
+        parsed = parse.urlparse(value)
+        value = parse.unquote(parsed.path or "")
+        if parsed.netloc:
+            value = f"//{parsed.netloc}{value}"
+        if _looks_like_windows_absolute_path(value[1:]):
+            value = value[1:]
+    value = os.path.expandvars(os.path.expanduser(value))
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        return None
+    if not candidate.exists() or not candidate.is_file():
+        return None
+    return candidate.resolve()
+
+
+def _backup_rel_for_external_asset(path: Path) -> str:
+    raw = str(path)
+    if _looks_like_windows_absolute_path(raw):
+        pure = PureWindowsPath(raw)
+        drive = (pure.drive or "drive").replace(":", "")
+        parts = [p for p in pure.parts[1:] if p not in ("\\", "/")]
+        rel = Path(EXTERNAL_ASSETS_DIR) / "windows" / drive
+        for part in parts:
+            rel /= part
+        return rel.as_posix()
+    parts = [p for p in path.parts if p != "/"]
+    rel = Path(EXTERNAL_ASSETS_DIR) / "posix"
+    for part in parts:
+        rel /= part
+    return rel.as_posix()
+
+
+def collect_external_assets(include_logs: bool, include_cache: bool):
+    cfg = get_obs_config_dir().resolve()
+    assets = []
+    seen = set()
+    for rel, src in iter_obs_files(include_logs, include_cache):
+        if not rel.lower().endswith(".json"):
+            continue
+        try:
+            with open(src, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            continue
+        for value in _iter_nested_strings(payload):
+            asset_path = _normalize_asset_path(value)
+            if asset_path is None or _is_relative_to(asset_path, cfg):
+                continue
+            key = str(asset_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            assets.append({
+                "original_path": key,
+                "backup_path": _backup_rel_for_external_asset(asset_path),
+                "source_path": asset_path,
+            })
+    return assets
+
+
+def write_external_assets_backup(backup_root: Path, assets):
+    if not assets:
+        return
+    manifest = []
+    for asset in assets:
+        src = asset["source_path"]
+        rel = asset["backup_path"]
+        dest = backup_root / rel
+        ensure_parent(dest)
+        shutil.copy2(str(src), str(dest))
+        manifest.append({
+            "original_path": asset["original_path"],
+            "backup_path": rel,
+        })
+    manifest_path = backup_root / EXTERNAL_ASSETS_MANIFEST
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "files": manifest}, f, indent=2)
+
+
+def _target_path_from_manifest(original_path: str):
+    if sys.platform.startswith("win"):
+        if original_path.startswith("/"):
+            return None
+        return Path(PureWindowsPath(original_path)) if _looks_like_windows_absolute_path(original_path) else Path(original_path)
+    if _looks_like_windows_absolute_path(original_path):
+        return None
+    p = Path(original_path)
+    if not p.is_absolute():
+        return None
+    return p
+
+
+def _restore_external_assets_from_backup_root(backup_root: Path):
+    manifest_path = backup_root / EXTERNAL_ASSETS_MANIFEST
+    if not manifest_path.exists():
+        return
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except Exception as e:
+        warn(f"Unable to read external assets manifest: {e}")
+        return
+    for asset in manifest.get("files", []):
+        original_path = asset.get("original_path", "")
+        backup_path = asset.get("backup_path", "")
+        if not original_path or not backup_path:
+            continue
+        src = backup_root / backup_path
+        if not src.exists() or not src.is_file():
+            warn(f"Missing external asset in backup: {backup_path}")
+            continue
+        dest = _target_path_from_manifest(original_path)
+        if dest is None:
+            warn(f"Skipping external asset for incompatible path: {original_path}")
+            continue
+        ensure_parent(dest)
+        shutil.copy2(str(src), str(dest))
 
 
 def g_get(settings_key, default=None):
@@ -345,6 +498,23 @@ def do_backup_now(props=None, prop=None):
                 count += 1
                 if count % 50 == 0:
                     info(f"Uploading... {count} files")
+            external_assets = collect_external_assets(include_logs, include_cache)
+            if external_assets:
+                manifest = []
+                for asset in external_assets:
+                    repo_path = _gh_join(folder, backup_name, asset["backup_path"])
+                    with open(asset["source_path"], "rb") as f:
+                        data = f.read()
+                    client.put_file(repo, branch, repo_path, data, message=f"OBS backup {backup_name}: {asset['backup_path']}")
+                    manifest.append({
+                        "original_path": asset["original_path"],
+                        "backup_path": asset["backup_path"],
+                    })
+                    count += 1
+                manifest_bytes = json.dumps({"version": 1, "files": manifest}, indent=2).encode("utf-8")
+                manifest_path = _gh_join(folder, backup_name, EXTERNAL_ASSETS_MANIFEST)
+                client.put_file(repo, branch, manifest_path, manifest_bytes, message=f"OBS backup {backup_name}: {EXTERNAL_ASSETS_MANIFEST}")
+                count += 1
             info(f"Upload complete. {count} files to {repo}/{base_in_repo}")
         return True
     except Exception as e:
@@ -399,11 +569,9 @@ def _extract_zip_to_config(zip_file_path: Path):
     with tempfile.TemporaryDirectory() as td:
         with zipfile.ZipFile(str(zip_file_path), "r") as zf:
             zf.extractall(td)
-        extracted_root = Path(td) / "obs-studio"
-        if not extracted_root.exists():
-            extracted_root = Path(td)
+        config_root, backup_root = _resolve_backup_roots(Path(td))
         info(f"Restoring to {cfg}")
-        for item in extracted_root.iterdir():
+        for item in config_root.iterdir():
             dest = cfg / item.name
             if dest.exists():
                 if dest.is_dir():
@@ -418,6 +586,7 @@ def _extract_zip_to_config(zip_file_path: Path):
             else:
                 ensure_parent(dest)
                 shutil.copy2(str(item), str(dest))
+        _restore_external_assets_from_backup_root(backup_root)
 
 
 def _backup_current_config():
@@ -453,16 +622,21 @@ def _restore_pairs_to_config(pairs):
             f.write(data)
 
 
+def _resolve_backup_roots(folder: Path):
+    if (folder / "obs-studio").exists():
+        return folder / "obs-studio", folder
+    if folder.name == "obs-studio":
+        return folder, folder.parent
+    candidates = list(folder.glob("*/obs-studio"))
+    if candidates:
+        return candidates[0], candidates[0].parent
+    raise RuntimeError("Invalid backup folder.")
+
+
 def _restore_from_folder(folder: Path):
     if not folder.exists() or not folder.is_dir():
         raise RuntimeError("Invalid backup folder.")
-    root = folder
-    if (folder / "obs-studio").exists():
-        root = folder / "obs-studio"
-    elif folder.name != "obs-studio":
-        cand = list(folder.glob("*/obs-studio"))
-        if cand:
-            root = cand[0]
+    root, backup_root = _resolve_backup_roots(folder)
     pairs = []
     start = Path(root)
     for p in start.rglob("*"):
@@ -471,6 +645,7 @@ def _restore_from_folder(folder: Path):
             with open(p, "rb") as f:
                 pairs.append((rel, f.read()))
     _restore_pairs_to_config(pairs)
+    _restore_external_assets_from_backup_root(backup_root)
 
 
 def do_restore_local(props=None, prop=None):
@@ -525,6 +700,26 @@ def do_restore_remote(props=None, prop=None):
         if not pairs:
             raise RuntimeError("No files found in the remote backup.")
         _restore_pairs_to_config(pairs)
+        manifest_path = sel_path.rstrip("/") + "/" + EXTERNAL_ASSETS_MANIFEST
+        try:
+            content_b64, _ = client.get_file_content_b64(repo, branch, manifest_path)
+            manifest = json.loads(base64.b64decode(content_b64).decode("utf-8"))
+            with tempfile.TemporaryDirectory() as td:
+                backup_root = Path(td)
+                for asset in manifest.get("files", []):
+                    backup_path = asset.get("backup_path", "")
+                    if not backup_path:
+                        continue
+                    asset_b64, _ = client.get_file_content_b64(repo, branch, sel_path.rstrip("/") + "/" + backup_path)
+                    dest = backup_root / backup_path
+                    ensure_parent(dest)
+                    with open(dest, "wb") as f:
+                        f.write(base64.b64decode(asset_b64))
+                with open(backup_root / EXTERNAL_ASSETS_MANIFEST, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f)
+                _restore_external_assets_from_backup_root(backup_root)
+        except Exception:
+            pass
         info("Remote restore complete. Restart OBS.")
         return True
     except Exception as e:
