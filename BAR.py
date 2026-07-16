@@ -418,7 +418,7 @@ def _active_collection_name_from_backup(obs_config_root: Path):
             cp = configparser.RawConfigParser(strict=False)
             # strict=False: OBS-generated INI files can contain duplicate keys in some
             # edge cases; lenient parsing avoids crashing on those rare files.
-            cp.read(str(global_ini), encoding="utf-8")
+            cp.read(str(global_ini), encoding="utf-8-sig")
             # SceneCollectionFile is the on-disk stem; SceneCollection is the display name.
             # Try both so either OBS version works.
             name = (cp.get("Basic", "SceneCollectionFile", fallback=None) or
