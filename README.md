@@ -5,6 +5,8 @@ The backup includes the OBS `obs-studio` config folder and also external source 
 
 By default, logs are excluded unless `Include logs` is enabled. Cache folders, crash dumps, temporary files, and lock files are still excluded.
 
+For GitHub backups, very large external assets are skipped to stay within practical upload limits of the GitHub contents API.
+
 > [!IMPORTANT]
 > Python 3.13+ is recommended to use this script
 

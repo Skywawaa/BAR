@@ -40,6 +40,7 @@ K_REMOTE_SELECT = "remote_select"
 K_RESTORE_REMOTE_BTN = "restore_remote_btn"
 EXTERNAL_ASSETS_DIR = "external-assets"
 EXTERNAL_ASSETS_MANIFEST = "external-assets.json"
+MAX_REMOTE_ASSET_BYTES = 50 * 1024 * 1024
 
 def _log(level, msg):
     try:
@@ -220,7 +221,8 @@ def collect_external_assets(include_logs: bool, include_cache: bool):
     assets = []
     seen = set()
     for rel, src in iter_obs_files(include_logs, include_cache):
-        if not rel.lower().endswith(".json"):
+        rel_lower = rel.lower()
+        if not rel_lower.endswith(".json"):
             continue
         try:
             with open(src, "r", encoding="utf-8") as f:
@@ -267,7 +269,9 @@ def _target_path_from_manifest(original_path: str):
     if sys.platform.startswith("win"):
         if original_path.startswith("/"):
             return None
-        return Path(PureWindowsPath(original_path)) if _looks_like_windows_absolute_path(original_path) else Path(original_path)
+        if _looks_like_windows_absolute_path(original_path):
+            return Path(PureWindowsPath(original_path))
+        return Path(original_path)
     if _looks_like_windows_absolute_path(original_path):
         return None
     p = Path(original_path)
@@ -504,6 +508,10 @@ def do_backup_now(props=None, prop=None):
                 manifest = []
                 for asset in external_assets:
                     repo_path = _gh_join(folder, backup_name, asset["backup_path"])
+                    asset_size = asset["source_path"].stat().st_size
+                    if asset_size > MAX_REMOTE_ASSET_BYTES:
+                        warn(f"Skipping remote external asset larger than {MAX_REMOTE_ASSET_BYTES // (1024 * 1024)} MB: {asset['source_path']}")
+                        continue
                     with open(asset["source_path"], "rb") as f:
                         data = f.read()
                     client.put_file(repo, branch, repo_path, data, message=f"OBS backup {backup_name}: {asset['backup_path']}")
@@ -570,9 +578,9 @@ def _extract_zip_to_config(zip_file_path: Path):
     with tempfile.TemporaryDirectory() as td:
         with zipfile.ZipFile(str(zip_file_path), "r") as zf:
             zf.extractall(td)
-        config_root, backup_root = _resolve_backup_roots(Path(td))
+        obs_config_root, backup_container_root = _resolve_backup_roots(Path(td))
         info(f"Restoring to {cfg}")
-        for item in config_root.iterdir():
+        for item in obs_config_root.iterdir():
             dest = cfg / item.name
             if dest.exists():
                 if dest.is_dir():
@@ -587,7 +595,7 @@ def _extract_zip_to_config(zip_file_path: Path):
             else:
                 ensure_parent(dest)
                 shutil.copy2(str(item), str(dest))
-        _restore_external_assets_from_backup_root(backup_root)
+        _restore_external_assets_from_backup_root(backup_container_root)
 
 
 def _backup_current_config():
@@ -631,7 +639,7 @@ def _resolve_backup_roots(folder: Path):
     candidates = list(folder.glob("*/obs-studio"))
     if candidates:
         return candidates[0], candidates[0].parent
-    raise RuntimeError("Invalid backup folder.")
+    raise RuntimeError("Backup folder does not contain an obs-studio directory or a valid BAR backup structure.")
 
 
 def _restore_from_folder(folder: Path):
@@ -701,7 +709,7 @@ def do_restore_remote(props=None, prop=None):
         if not pairs:
             raise RuntimeError("No files found in the remote backup.")
         _restore_pairs_to_config(pairs)
-        manifest_path = sel_path.rstrip("/") + "/" + EXTERNAL_ASSETS_MANIFEST
+        manifest_path = _gh_join(sel_path, EXTERNAL_ASSETS_MANIFEST)
         try:
             content_b64, _ = client.get_file_content_b64(repo, branch, manifest_path)
             manifest = json.loads(base64.b64decode(content_b64).decode("utf-8"))
@@ -711,7 +719,7 @@ def do_restore_remote(props=None, prop=None):
                     backup_path = asset.get("backup_path", "")
                     if not backup_path:
                         continue
-                    asset_b64, _ = client.get_file_content_b64(repo, branch, sel_path.rstrip("/") + "/" + backup_path)
+                    asset_b64, _ = client.get_file_content_b64(repo, branch, _gh_join(sel_path, backup_path))
                     dest = backup_root / backup_path
                     ensure_parent(dest)
                     with open(dest, "wb") as f:
