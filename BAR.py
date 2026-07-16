@@ -189,7 +189,7 @@ def _normalize_asset_path(raw_value: str):
         value = parse.unquote(parsed.path or "")
         if parsed.netloc:
             value = f"//{parsed.netloc}{value}"
-        if value.startswith("/") and _looks_like_windows_absolute_path(value[1:]):
+        if sys.platform.startswith("win") and value.startswith("/") and _looks_like_windows_absolute_path(value[1:]):
             value = value[1:]
     value = os.path.expandvars(os.path.expanduser(value))
     candidate = Path(value)
@@ -203,13 +203,14 @@ def _normalize_asset_path(raw_value: str):
 def _backup_rel_for_external_asset(path: Path) -> str:
     raw = str(path)
     if _looks_like_windows_absolute_path(raw):
-        pure = PureWindowsPath(raw)
         if raw.startswith("\\\\"):
-            server = pure.parts[0].strip("\\") if pure.parts else "unc"
-            share = pure.parts[1].strip("\\") if len(pure.parts) > 1 else "share"
-            parts = [p for p in pure.parts[2:] if p not in ("\\", "/")]
+            unc_parts = [p for p in re.split(r"[\\/]+", raw.lstrip("\\")) if p]
+            server = unc_parts[0] if len(unc_parts) > 0 else "unc"
+            share = unc_parts[1] if len(unc_parts) > 1 else "share"
+            parts = unc_parts[2:]
             rel = Path(EXTERNAL_ASSETS_DIR) / "windows-unc" / server / share
         else:
+            pure = PureWindowsPath(raw)
             drive = (pure.drive or "drive").replace(":", "")
             parts = [p for p in pure.parts[1:] if p not in ("\\", "/")]
             rel = Path(EXTERNAL_ASSETS_DIR) / "windows" / drive
@@ -227,10 +228,14 @@ def collect_external_assets(include_logs: bool, include_cache: bool):
     cfg = get_obs_config_dir().resolve()
     assets = []
     seen = set()
+    scanned_json_files = 0
     for rel, src in iter_obs_files(include_logs, include_cache):
         rel_lower = rel.lower()
         if not rel_lower.endswith(".json"):
             continue
+        scanned_json_files += 1
+        if scanned_json_files % 25 == 0:
+            info(f"Scanning JSON files for external assets... {scanned_json_files}")
         try:
             with open(src, "r", encoding="utf-8") as f:
                 payload = json.load(f)
@@ -269,7 +274,7 @@ def write_external_assets_backup(backup_root: Path, assets):
         })
     manifest_path = backup_root / EXTERNAL_ASSETS_MANIFEST
     with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump({"version": 1, "files": manifest}, f, indent=2)
+        json.dump({"version": 2, "source_host": hostname(), "files": manifest}, f, indent=2)
 
 
 def _target_path_from_manifest(original_path: str):
@@ -296,6 +301,11 @@ def _restore_external_assets_from_backup_root(backup_root: Path):
             manifest = json.load(f)
     except Exception as e:
         warn(f"Unable to read external assets manifest: {e}")
+        return
+    source_host = manifest.get("source_host")
+    current_host = hostname()
+    if source_host and source_host != current_host:
+        warn(f"Skipping external asset restore because backup was created on host '{source_host}' and current host is '{current_host}'.")
         return
     for asset in manifest.get("files", []):
         original_path = asset.get("original_path", "")
@@ -527,7 +537,7 @@ def do_backup_now(props=None, prop=None):
                         "backup_path": asset["backup_path"],
                     })
                     count += 1
-                manifest_bytes = json.dumps({"version": 1, "files": manifest}, indent=2).encode("utf-8")
+                manifest_bytes = json.dumps({"version": 2, "source_host": hostname(), "files": manifest}, indent=2).encode("utf-8")
                 manifest_path = _gh_join(folder, backup_name, EXTERNAL_ASSETS_MANIFEST)
                 client.put_file(repo, branch, manifest_path, manifest_bytes, message=f"OBS backup {backup_name}: {EXTERNAL_ASSETS_MANIFEST}")
                 count += 1
@@ -643,7 +653,7 @@ def _resolve_backup_roots(folder: Path):
         return folder / "obs-studio", folder
     if folder.name == "obs-studio":
         return folder, folder.parent
-    candidates = list(folder.glob("*/obs-studio"))
+    candidates = list(folder.glob("**/obs-studio"))
     if candidates:
         return candidates[0], candidates[0].parent
     raise RuntimeError("Backup folder must contain an obs-studio subdirectory or be opened from inside an obs-studio directory.")
@@ -693,7 +703,7 @@ def do_restore_remote(props=None, prop=None):
             raise RuntimeError("Token, repo, and selection required.")
         client = GitHubClient(token)
         
-        base = sel_path.rstrip("/") + "/obs-studio"
+        base = _gh_join(sel_path, "obs-studio")
 
         def _collect_pairs(root_path: str):
             pairs = []
@@ -722,10 +732,13 @@ def do_restore_remote(props=None, prop=None):
             manifest = json.loads(base64.b64decode(content_b64).decode("utf-8"))
             with tempfile.TemporaryDirectory() as td:
                 backup_root = Path(td)
-                for asset in manifest.get("files", []):
+                files = manifest.get("files", [])
+                for idx, asset in enumerate(files, start=1):
                     backup_path = asset.get("backup_path", "")
                     if not backup_path:
                         continue
+                    if idx % 25 == 0:
+                        info(f"Downloading external assets... {idx}")
                     asset_b64, _ = client.get_file_content_b64(repo, branch, _gh_join(sel_path, backup_path))
                     dest = backup_root / backup_path
                     ensure_parent(dest)
