@@ -1,0 +1,24 @@
+[package]
+name = "bar-app"
+version = "0.1.0"
+edition = "2021"
+description = "OBS Backup And Restore - standalone app (compilable to .exe)"
+
+[[bin]]
+name = "bar"
+path = "src/main.rs"
+
+[dependencies]
+zip       = "2.3"
+serde     = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap      = { version = "4", features = ["derive"] }
+walkdir   = "2"
+tempfile  = "3"
+anyhow    = "1"
+
+[profile.release]
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+strip         = true
