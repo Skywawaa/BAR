@@ -187,7 +187,7 @@ def _normalize_asset_path(raw_value: str):
         value = parse.unquote(parsed.path or "")
         if parsed.netloc:
             value = f"//{parsed.netloc}{value}"
-        if _looks_like_windows_absolute_path(value[1:]):
+        if value.startswith("/") and _looks_like_windows_absolute_path(value[1:]):
             value = value[1:]
     value = os.path.expandvars(os.path.expanduser(value))
     candidate = Path(value)
@@ -225,7 +225,8 @@ def collect_external_assets(include_logs: bool, include_cache: bool):
         try:
             with open(src, "r", encoding="utf-8") as f:
                 payload = json.load(f)
-        except Exception:
+        except Exception as e:
+            warn(f"Skipping JSON asset scan for {src}: {e}")
             continue
         for value in _iter_nested_strings(payload):
             asset_path = _normalize_asset_path(value)
@@ -718,8 +719,8 @@ def do_restore_remote(props=None, prop=None):
                 with open(backup_root / EXTERNAL_ASSETS_MANIFEST, "w", encoding="utf-8") as f:
                     json.dump(manifest, f)
                 _restore_external_assets_from_backup_root(backup_root)
-        except Exception:
-            pass
+        except Exception as e:
+            warn(f"Unable to restore external assets from remote backup: {e}")
         info("Remote restore complete. Restart OBS.")
         return True
     except Exception as e:
