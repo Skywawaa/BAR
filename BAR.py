@@ -3,6 +3,7 @@
 # works well on Windows and Linux (not tested on macOS, but it should work)
 
 import obspython as obs
+import configparser
 import os
 import sys
 import platform
@@ -405,6 +406,102 @@ def _strip_stream_key(rel_path: str, data_bytes: bytes) -> bytes:
     return data_bytes
 
 
+def _active_collection_name_from_backup(obs_config_root: Path):
+    """Return the scene collection name that was active at backup time, from global.ini.
+
+    Falls back to the filename stem of the first JSON file found in basic/scenes/.
+    Returns None if no scene collection can be determined.
+    """
+    global_ini = obs_config_root / "global.ini"
+    if global_ini.exists():
+        try:
+            cp = configparser.RawConfigParser(strict=False)
+            # strict=False: OBS-generated INI files can contain duplicate keys in some
+            # edge cases; lenient parsing avoids crashing on those rare files.
+            cp.read(str(global_ini), encoding="utf-8")
+            # SceneCollectionFile is the on-disk stem; SceneCollection is the display name.
+            # Try both so either OBS version works.
+            name = (cp.get("Basic", "SceneCollectionFile", fallback=None) or
+                    cp.get("Basic", "SceneCollection", fallback=None))
+            if name and name.strip():
+                return name.strip()
+        except Exception as e:
+            warn(f"Could not read SceneCollection from backup global.ini: {e}")
+    scenes_dir = obs_config_root / "basic" / "scenes"
+    if scenes_dir.exists():
+        files = sorted(scenes_dir.glob("*.json"))
+        if files:
+            return files[0].stem
+    return None
+
+
+def _trigger_scene_reload(cfg: Path, collection_name: str, collection_json: bytes):
+    """Force OBS to load the named scene collection from the restored files.
+
+    When the currently active collection has the *same* name as the restored one,
+    OBS would overwrite the restored file before loading it (it always saves the
+    current collection on a collection-switch).  We work around this with a
+    short-lived dummy collection so the restored file is never clobbered:
+
+      1. Write a minimal dummy collection JSON to basic/scenes/__BAR_RESTORE_TEMP__.json
+      2. Switch OBS to the dummy  →  OBS saves the stale in-memory state under
+         collection_name.json *before* loading the dummy.
+      3. Re-write the restored content to collection_name.json  (replaces the stale save).
+      4. Switch OBS back to collection_name  →  OBS loads the just-written restored file.
+      5. Delete the dummy file.
+
+    For collections with a *different* name the simple one-step switch is enough
+    (OBS saves the current collection under *its* name, which does not touch ours).
+    """
+    set_fn = getattr(obs, "obs_frontend_set_current_scene_collection", None)
+    get_fn = getattr(obs, "obs_frontend_get_current_scene_collection", None)
+    if set_fn is None or get_fn is None:
+        warn("OBS frontend scene API not available; restart OBS to load the restored scene collection.")
+        return
+
+    try:
+        current = get_fn()
+        scenes_dir = cfg / "basic" / "scenes"
+
+        if current != collection_name:
+            # Different name: simple switch — OBS saves the current collection
+            # under its own name (does not touch our restored file), then loads ours.
+            set_fn(collection_name)
+            info(f"Scene collection '{collection_name}' loaded from restored backup.")
+            return
+
+        # Same-name case: use the dummy-collection trick described above.
+        temp_name = "__BAR_RESTORE_TEMP__"
+        temp_file = scenes_dir / f"{temp_name}.json"
+        try:
+            ensure_parent(temp_file)
+            with open(temp_file, "wb") as f:
+                f.write(json.dumps({
+                    # Minimal structure accepted by all OBS versions: a name and an
+                    # empty sources array.  OBS fills in any missing fields itself.
+                    "name": temp_name,
+                    "current_program_scene": "",
+                    "current_preview_scene": "",
+                    "sources": [],
+                }).encode("utf-8"))
+            # Step 2: switch to dummy; OBS saves stale state to collection_name.json
+            set_fn(temp_name)
+            # Step 3: overwrite the just-saved stale file with our restored content
+            target_file = scenes_dir / f"{collection_name}.json"
+            with open(target_file, "wb") as f:
+                f.write(collection_json)
+            # Step 4: switch back; OBS loads our restored file
+            set_fn(collection_name)
+            info(f"Scene collection '{collection_name}' reloaded from restored backup.")
+        finally:
+            try:
+                temp_file.unlink()
+            except Exception:
+                pass
+    except Exception as e:
+        warn(f"Could not reload scene collection via OBS API: {e}")
+
+
 def _restore_external_assets_from_backup_root(backup_root: Path, restore_assets_dir: Path = None) -> dict:
     """Restore external assets from backup and return a mapping of original_path -> actual_restored_path.
 
@@ -542,11 +639,28 @@ def _extract_zip_to_config(zip_file_path: Path):
     except Exception as e:
         warn(f"Unable to backup previous state: {e}")
 
-    
+    # Capture the target scene collection JSON *inside* the temp-dir context so we
+    # can reload OBS after the context closes and the temp dir is gone.
+    target_collection_name = None
+    target_collection_json = None
+
     with tempfile.TemporaryDirectory() as td:
         with zipfile.ZipFile(str(zip_file_path), "r") as zf:
             zf.extractall(td)
         obs_config_root, backup_container_root = _resolve_backup_roots(Path(td))
+
+        # Determine which collection to reload after the files land on disk.
+        col_name = _active_collection_name_from_backup(obs_config_root)
+        if col_name:
+            col_file = obs_config_root / "basic" / "scenes" / f"{col_name}.json"
+            if col_file.exists():
+                try:
+                    with open(col_file, "rb") as f:
+                        target_collection_name = col_name
+                        target_collection_json = f.read()
+                except Exception as e:
+                    warn(f"Could not read backup scene collection '{col_name}': {e}")
+
         info(f"Restoring to {cfg}")
         for item in obs_config_root.iterdir():
             dest = cfg / item.name
@@ -575,6 +689,11 @@ def _extract_zip_to_config(zip_file_path: Path):
         path_mapping = _restore_external_assets_from_backup_root(backup_container_root)
         if path_mapping:
             _repath_obs_json_files(cfg, path_mapping)
+
+    # Trigger OBS to load the restored scene collection immediately so the restored
+    # files are not overwritten by OBS's stale in-memory state on the next shutdown.
+    if target_collection_name and target_collection_json:
+        _trigger_scene_reload(cfg, target_collection_name, target_collection_json)
 
 
 def _backup_current_config():
@@ -638,6 +757,21 @@ def _restore_from_folder(folder: Path):
     if not folder.exists() or not folder.is_dir():
         raise RuntimeError("Invalid backup folder.")
     root, backup_root = _resolve_backup_roots(folder)
+
+    # Capture target scene collection before writing to cfg (the source is stable here).
+    col_name = _active_collection_name_from_backup(root)
+    target_collection_name = None
+    target_collection_json = None
+    if col_name:
+        col_file = root / "basic" / "scenes" / f"{col_name}.json"
+        if col_file.exists():
+            try:
+                with open(col_file, "rb") as f:
+                    target_collection_name = col_name
+                    target_collection_json = f.read()
+            except Exception as e:
+                warn(f"Could not read backup scene collection '{col_name}': {e}")
+
     pairs = []
     start = Path(root)
     for p in start.rglob("*"):
@@ -649,6 +783,9 @@ def _restore_from_folder(folder: Path):
     path_mapping = _restore_external_assets_from_backup_root(backup_root)
     if path_mapping:
         _repath_obs_json_files(get_obs_config_dir(), path_mapping)
+
+    if target_collection_name and target_collection_json:
+        _trigger_scene_reload(get_obs_config_dir(), target_collection_name, target_collection_json)
 
 
 def do_restore_local(props=None, prop=None):
@@ -663,7 +800,7 @@ def do_restore_local(props=None, prop=None):
             raise RuntimeError("Please select a valid .zip backup file.")
         _update_status("Restore in progress…")
         _extract_zip_to_config(p)
-        _update_status("Restore complete — restart OBS to apply.")
+        _update_status("Restore complete — scene collection reloaded. Restart OBS to apply remaining settings.")
         return True
     except Exception as e:
         _update_status(f"Restore failed: {e}")
