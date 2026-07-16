@@ -39,7 +39,8 @@ K_REMOTE_REFRESH = "remote_refresh"
 K_REMOTE_SELECT = "remote_select"
 K_RESTORE_REMOTE_BTN = "restore_remote_btn"
 EXTERNAL_ASSETS_DIR = "external-assets"
-EXTERNAL_ASSETS_MANIFEST = "external-assets.json"
+EXTERNAL_ASSETS_MANIFEST_FILE = "external-assets.json"
+EXTERNAL_ASSETS_MANIFEST_VERSION = 2
 MAX_REMOTE_ASSET_MB = 50
 MAX_REMOTE_ASSET_BYTES = MAX_REMOTE_ASSET_MB * 1024 * 1024
 
@@ -264,17 +265,17 @@ def write_external_assets_backup(backup_root: Path, assets):
     manifest = []
     for asset in assets:
         src = asset["source_path"]
-        rel = asset["backup_path"]
-        dest = backup_root / rel
+        backup_rel_path = asset["backup_path"]
+        dest = backup_root / backup_rel_path
         ensure_parent(dest)
         shutil.copy2(str(src), str(dest))
         manifest.append({
             "original_path": asset["original_path"],
-            "backup_path": rel,
+            "backup_path": backup_rel_path,
         })
-    manifest_path = backup_root / EXTERNAL_ASSETS_MANIFEST
+    manifest_path = backup_root / EXTERNAL_ASSETS_MANIFEST_FILE
     with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump({"version": 2, "source_host": hostname(), "files": manifest}, f, indent=2)
+        json.dump({"version": EXTERNAL_ASSETS_MANIFEST_VERSION, "source_host": hostname(), "files": manifest}, f, indent=2)
 
 
 def _target_path_from_manifest(original_path: str):
@@ -293,7 +294,7 @@ def _target_path_from_manifest(original_path: str):
 
 
 def _restore_external_assets_from_backup_root(backup_root: Path):
-    manifest_path = backup_root / EXTERNAL_ASSETS_MANIFEST
+    manifest_path = backup_root / EXTERNAL_ASSETS_MANIFEST_FILE
     if not manifest_path.exists():
         return
     try:
@@ -537,9 +538,9 @@ def do_backup_now(props=None, prop=None):
                         "backup_path": asset["backup_path"],
                     })
                     count += 1
-                manifest_bytes = json.dumps({"version": 2, "source_host": hostname(), "files": manifest}, indent=2).encode("utf-8")
-                manifest_path = _gh_join(folder, backup_name, EXTERNAL_ASSETS_MANIFEST)
-                client.put_file(repo, branch, manifest_path, manifest_bytes, message=f"OBS backup {backup_name}: {EXTERNAL_ASSETS_MANIFEST}")
+                manifest_bytes = json.dumps({"version": EXTERNAL_ASSETS_MANIFEST_VERSION, "source_host": hostname(), "files": manifest}, indent=2).encode("utf-8")
+                manifest_path = _gh_join(folder, backup_name, EXTERNAL_ASSETS_MANIFEST_FILE)
+                client.put_file(repo, branch, manifest_path, manifest_bytes, message=f"OBS backup {backup_name}: {EXTERNAL_ASSETS_MANIFEST_FILE}")
                 count += 1
             info(f"Upload complete. {count} files to {repo}/{base_in_repo}")
         return True
@@ -648,15 +649,27 @@ def _restore_pairs_to_config(pairs):
             f.write(data)
 
 
+def _find_nested_obs_studio(folder: Path, max_depth: int = 2):
+    root_depth = len(folder.parts)
+    for root, dirs, _files in os.walk(folder):
+        current = Path(root)
+        depth = len(current.parts) - root_depth
+        if current.name == "obs-studio":
+            return current
+        if depth >= max_depth:
+            dirs[:] = []
+    return None
+
+
 def _resolve_backup_roots(folder: Path):
     if (folder / "obs-studio").exists():
         return folder / "obs-studio", folder
     if folder.name == "obs-studio":
         return folder, folder.parent
-    candidates = list(folder.glob("**/obs-studio"))
-    if candidates:
-        return candidates[0], candidates[0].parent
-    raise RuntimeError("Backup folder must contain an obs-studio subdirectory or be opened from inside an obs-studio directory.")
+    nested = _find_nested_obs_studio(folder)
+    if nested is not None:
+        return nested, nested.parent
+    raise RuntimeError("Invalid backup structure: expected an 'obs-studio' folder in the selected backup directory or inside it.")
 
 
 def _restore_from_folder(folder: Path):
@@ -726,25 +739,25 @@ def do_restore_remote(props=None, prop=None):
         if not pairs:
             raise RuntimeError("No files found in the remote backup.")
         _restore_pairs_to_config(pairs)
-        manifest_path = _gh_join(sel_path, EXTERNAL_ASSETS_MANIFEST)
+        manifest_path = _gh_join(sel_path, EXTERNAL_ASSETS_MANIFEST_FILE)
         try:
             content_b64, _ = client.get_file_content_b64(repo, branch, manifest_path)
             manifest = json.loads(base64.b64decode(content_b64).decode("utf-8"))
             with tempfile.TemporaryDirectory() as td:
                 backup_root = Path(td)
                 files = manifest.get("files", [])
-                for idx, asset in enumerate(files, start=1):
+                for asset_num, asset in enumerate(files, start=1):
                     backup_path = asset.get("backup_path", "")
                     if not backup_path:
                         continue
-                    if idx % 25 == 0:
-                        info(f"Downloading external assets... {idx}")
+                    if asset_num % 25 == 0:
+                        info(f"Downloading external assets... {asset_num}")
                     asset_b64, _ = client.get_file_content_b64(repo, branch, _gh_join(sel_path, backup_path))
                     dest = backup_root / backup_path
                     ensure_parent(dest)
                     with open(dest, "wb") as f:
                         f.write(base64.b64decode(asset_b64))
-                with open(backup_root / EXTERNAL_ASSETS_MANIFEST, "w", encoding="utf-8") as f:
+                with open(backup_root / EXTERNAL_ASSETS_MANIFEST_FILE, "w", encoding="utf-8") as f:
                     json.dump(manifest, f)
                 _restore_external_assets_from_backup_root(backup_root)
         except Exception as e:
