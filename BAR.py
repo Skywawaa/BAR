@@ -235,7 +235,7 @@ def collect_external_assets(include_logs: bool, include_cache: bool):
         if not rel_lower.endswith(".json"):
             continue
         scanned_json_files += 1
-        if scanned_json_files % 25 == 0:
+        if scanned_json_files % 50 == 0:
             info(f"Scanning JSON files for external assets... {scanned_json_files}")
         try:
             with open(src, "r", encoding="utf-8") as f:
@@ -306,8 +306,7 @@ def _restore_external_assets_from_backup_root(backup_root: Path):
     source_host = manifest.get("source_host")
     current_host = hostname()
     if source_host and source_host != current_host:
-        warn(f"Skipping external asset restore because backup was created on host '{source_host}' and current host is '{current_host}'.")
-        return
+        warn(f"External asset restore is running on host '{current_host}', but the backup was created on host '{source_host}'. Original paths may not exist on this machine.")
     for asset in manifest.get("files", []):
         original_path = asset.get("original_path", "")
         backup_path = asset.get("backup_path", "")
@@ -528,7 +527,7 @@ def do_backup_now(props=None, prop=None):
                     repo_path = _gh_join(folder, backup_name, asset["backup_path"])
                     asset_size = asset["source_path"].stat().st_size
                     if asset_size > MAX_REMOTE_ASSET_BYTES:
-                        warn(f"Skipping remote external asset larger than {MAX_REMOTE_ASSET_MB} MB: {asset['source_path']}")
+                        warn(f"Skipping remote external asset larger than {MAX_REMOTE_ASSET_MB} MB (it will not be restorable from this backup): {asset['source_path']}")
                         continue
                     with open(asset["source_path"], "rb") as f:
                         data = f.read()
@@ -669,7 +668,7 @@ def _resolve_backup_roots(folder: Path):
     nested = _find_nested_obs_studio(folder)
     if nested is not None:
         return nested, nested.parent
-    raise RuntimeError("Invalid backup structure: expected an 'obs-studio' folder in the selected backup directory or inside it.")
+    raise RuntimeError("Invalid backup structure: expected an 'obs-studio' folder in the selected backup directory or inside it, with any external asset files stored alongside that backup root.")
 
 
 def _restore_from_folder(folder: Path):
@@ -750,7 +749,7 @@ def do_restore_remote(props=None, prop=None):
                     backup_path = asset.get("backup_path", "")
                     if not backup_path:
                         continue
-                    if asset_num % 25 == 0:
+                    if asset_num % 50 == 0:
                         info(f"Downloading external assets... {asset_num}")
                     asset_b64, _ = client.get_file_content_b64(repo, branch, _gh_join(sel_path, backup_path))
                     dest = backup_root / backup_path
