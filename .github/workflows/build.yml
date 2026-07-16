@@ -1,0 +1,59 @@
+name: Build Windows .exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Build Windows executables
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: bar-app
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            bar-app\target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('bar-app/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Upload bar.exe (CLI)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bar-cli-windows-x64
+          path: bar-app\target\release\bar.exe
+
+      - name: Upload bar-gui.exe (GUI)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bar-gui-windows-x64
+          path: bar-app\target\release\bar-gui.exe
+
+      # Publish both executables as a GitHub Release when a version tag is pushed.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bar-app/target/release/bar.exe
+            bar-app/target/release/bar-gui.exe

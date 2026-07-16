@@ -8,14 +8,20 @@ description = "OBS Backup And Restore - standalone app (compilable to .exe)"
 name = "bar"
 path = "src/main.rs"
 
+[[bin]]
+name = "bar-gui"
+path = "src/main_gui.rs"
+
 [dependencies]
-zip       = "2.3"
-serde     = { version = "1", features = ["derive"] }
+zip        = "2.3"
+serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
-clap      = { version = "4", features = ["derive"] }
-walkdir   = "2"
-tempfile  = "3"
-anyhow    = "1"
+clap       = { version = "4", features = ["derive"] }
+walkdir    = "2"
+tempfile   = "3"
+anyhow     = "1"
+eframe     = "0.28"
+rfd        = "0.14"
 
 [profile.release]
 opt-level     = "z"
