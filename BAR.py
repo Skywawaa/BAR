@@ -445,8 +445,11 @@ def _restore_external_assets_from_backup_root(backup_root: Path, restore_assets_
             if dest is None:
                 dest = _fallback_asset_path(original_path, restore_assets_dir)
                 path_mapping[original_path] = str(dest)
-        ensure_parent(dest)
-        shutil.copy2(str(src), str(dest))
+        try:
+            ensure_parent(dest)
+            shutil.copy2(str(src), str(dest))
+        except (OSError, shutil.Error) as e:
+            warn(f"Could not restore external asset '{original_path}': {e}")
     return path_mapping
 
 
@@ -481,6 +484,19 @@ def ensure_parent(p: Path):
     p.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _update_status(msg: str):
+    """Log msg and, when the properties panel is open, update the status label."""
+    info(msg)
+    global g_props
+    if g_props is not None:
+        try:
+            prop = obs.obs_properties_get(g_props, K_STATUS)
+            if prop is not None:
+                obs.obs_property_set_description(prop, msg)
+        except Exception:
+            pass
+
+
 def _settings_from_shadow():
     try:
         s = obs.obs_data_create()
@@ -502,11 +518,12 @@ def do_backup_now(props=None, prop=None):
         g_set(K_INCLUDE_CACHE, include_cache)
 
         target_dir = Path(g_get_str(K_LOCAL_DIR, str(Path.home() / "obs-backups")))
-        info(f"Creating local backup in {target_dir}")
+        _update_status("Backup in progress…")
         zip_path = create_local_backup_zip(target_dir, include_logs, include_cache)
-        info(f"Backup created: {zip_path}")
+        _update_status(f"Backup created: {zip_path}")
         return True
     except Exception as e:
+        _update_status(f"Backup failed: {e}")
         err(f"Backup failed: {e}")
         return False
 
@@ -542,7 +559,16 @@ def _extract_zip_to_config(zip_file_path: Path):
                     except Exception:
                         pass
             if item.is_dir():
-                shutil.copytree(str(item), str(dest))
+                try:
+                    shutil.copytree(str(item), str(dest), dirs_exist_ok=True)
+                except TypeError:
+                    # Python < 3.8 fallback: destination must not exist
+                    try:
+                        if dest.exists():
+                            shutil.rmtree(str(dest))
+                        shutil.copytree(str(item), str(dest))
+                    except (OSError, shutil.Error) as e:
+                        warn(f"Could not copy {item.name} to config dir: {e}")
             else:
                 ensure_parent(dest)
                 shutil.copy2(str(item), str(dest))
@@ -635,10 +661,12 @@ def do_restore_local(props=None, prop=None):
             raise RuntimeError("File not found.")
         if not p.is_file() or p.suffix.lower() != ".zip":
             raise RuntimeError("Please select a valid .zip backup file.")
+        _update_status("Restore in progress…")
         _extract_zip_to_config(p)
-        info("Local restore complete. Restart OBS to fully apply.")
+        _update_status("Restore complete — restart OBS to apply.")
         return True
     except Exception as e:
+        _update_status(f"Restore failed: {e}")
         err(f"Local restore failed: {e}")
         return False
 
@@ -679,6 +707,11 @@ def script_properties():
 
     obs.obs_properties_add_path(props, K_RESTORE_LOCAL_PATH, "Backup zip file", obs.OBS_PATH_FILE, "ZIP Files (*.zip)", str(Path.home()))
     obs.obs_properties_add_button(props, K_RESTORE_LOCAL_BTN, "Restore from zip", do_restore_local)
+
+    try:
+        obs.obs_properties_add_text(props, K_STATUS, "Ready", obs.OBS_TEXT_INFO)
+    except Exception:
+        obs.obs_properties_add_text(props, K_STATUS, "Ready", obs.OBS_TEXT_DEFAULT)
 
     g_props = props
     return props
