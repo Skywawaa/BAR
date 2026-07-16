@@ -40,7 +40,8 @@ K_REMOTE_SELECT = "remote_select"
 K_RESTORE_REMOTE_BTN = "restore_remote_btn"
 EXTERNAL_ASSETS_DIR = "external-assets"
 EXTERNAL_ASSETS_MANIFEST = "external-assets.json"
-MAX_REMOTE_ASSET_BYTES = 50 * 1024 * 1024
+MAX_REMOTE_ASSET_MB = 50
+MAX_REMOTE_ASSET_BYTES = MAX_REMOTE_ASSET_MB * 1024 * 1024
 
 def _log(level, msg):
     try:
@@ -203,9 +204,15 @@ def _backup_rel_for_external_asset(path: Path) -> str:
     raw = str(path)
     if _looks_like_windows_absolute_path(raw):
         pure = PureWindowsPath(raw)
-        drive = (pure.drive or "drive").replace(":", "")
-        parts = [p for p in pure.parts[1:] if p not in ("\\", "/")]
-        rel = Path(EXTERNAL_ASSETS_DIR) / "windows" / drive
+        if raw.startswith("\\\\"):
+            server = pure.parts[0].strip("\\") if pure.parts else "unc"
+            share = pure.parts[1].strip("\\") if len(pure.parts) > 1 else "share"
+            parts = [p for p in pure.parts[2:] if p not in ("\\", "/")]
+            rel = Path(EXTERNAL_ASSETS_DIR) / "windows-unc" / server / share
+        else:
+            drive = (pure.drive or "drive").replace(":", "")
+            parts = [p for p in pure.parts[1:] if p not in ("\\", "/")]
+            rel = Path(EXTERNAL_ASSETS_DIR) / "windows" / drive
         for part in parts:
             rel /= part
         return rel.as_posix()
@@ -510,7 +517,7 @@ def do_backup_now(props=None, prop=None):
                     repo_path = _gh_join(folder, backup_name, asset["backup_path"])
                     asset_size = asset["source_path"].stat().st_size
                     if asset_size > MAX_REMOTE_ASSET_BYTES:
-                        warn(f"Skipping remote external asset larger than {MAX_REMOTE_ASSET_BYTES // (1024 * 1024)} MB: {asset['source_path']}")
+                        warn(f"Skipping remote external asset larger than {MAX_REMOTE_ASSET_MB} MB: {asset['source_path']}")
                         continue
                     with open(asset["source_path"], "rb") as f:
                         data = f.read()
@@ -639,7 +646,7 @@ def _resolve_backup_roots(folder: Path):
     candidates = list(folder.glob("*/obs-studio"))
     if candidates:
         return candidates[0], candidates[0].parent
-    raise RuntimeError("Backup folder does not contain an obs-studio directory or a valid BAR backup structure.")
+    raise RuntimeError("Backup folder must contain an obs-studio subdirectory or be opened from inside an obs-studio directory.")
 
 
 def _restore_from_folder(folder: Path):
