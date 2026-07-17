@@ -206,7 +206,20 @@ pub fn iter_obs_files(
             .strip_prefix(&cfg)
             .map(|r| r.to_string_lossy().replace('\\', "/"))
             .unwrap_or_default();
-        if rel.ends_with(".tmp") || rel.ends_with(".lock") {
+        // Skip lock/temp files and LevelDB internal files that are always locked
+        // while a browser plugin (CEF/obs-browser) is running.
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
+        let is_lock_file = rel.ends_with(".tmp")
+            || rel.ends_with(".lock")
+            || file_name == "LOCK"
+            || file_name == "LOG"
+            || file_name == "LOG.old"
+            || file_name == "CURRENT"
+            || file_name.starts_with("MANIFEST-");
+        if is_lock_file {
             continue;
         }
         result.push((rel, path));

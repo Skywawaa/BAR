@@ -31,7 +31,7 @@ pub struct BarApp {
     // Shared state between UI and worker threads
     log: Vec<String>,
     busy: Arc<Mutex<bool>>,
-    result: Arc<Mutex<Option<Result<String, String>>>>,
+    result: Arc<Mutex<Option<Result<(String, Vec<String>), String>>>>,
 
     // OBS-running confirmation dialog
     show_obs_dialog: bool,
@@ -68,7 +68,18 @@ impl BarApp {
         if let Ok(mut guard) = self.result.try_lock() {
             if let Some(res) = guard.take() {
                 match res {
-                    Ok(msg) => self.log.push(format!("✅  {msg}")),
+                    Ok((msg, warnings)) => {
+                        self.log.push(format!("✅  {msg}"));
+                        if !warnings.is_empty() {
+                            self.log.push(format!(
+                                "⚠️  {} file(s) skipped during backup:",
+                                warnings.len()
+                            ));
+                            for w in warnings {
+                                self.log.push(format!("   • {w}"));
+                            }
+                        }
+                    }
                     Err(e) => self.log.push(format!("❌  {e}")),
                 }
                 *self.busy.lock().unwrap() = false;
@@ -130,14 +141,13 @@ impl BarApp {
             let res =
                 crate::backup::create_local_backup_zip(&output_dir, include_logs, include_cache);
             let msg = match res {
-                Ok(path) => {
+                Ok((path, warnings)) => {
                     let size = std::fs::metadata(&path)
                         .map(|m| m.len() as f64 / 1_048_576.0)
                         .unwrap_or(0.0);
-                    Ok(format!(
-                        "Backup saved: {} ({:.1} MB)",
-                        path.display(),
-                        size
+                    Ok((
+                        format!("Backup saved: {} ({:.1} MB)", path.display(), size),
+                        warnings,
                     ))
                 }
                 Err(e) => Err(e.to_string()),
@@ -163,7 +173,7 @@ impl BarApp {
         std::thread::spawn(move || {
             let res = crate::restore::restore_from_zip(&zip_path, assets_dir.as_deref());
             let msg = match res {
-                Ok(()) => Ok("Restore complete — please restart OBS Studio.".into()),
+                Ok(()) => Ok(("Restore complete — please restart OBS Studio.".into(), vec![])),
                 Err(e) => Err(e.to_string()),
             };
             *result.lock().unwrap() = Some(msg);
