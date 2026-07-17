@@ -214,6 +214,53 @@ pub fn iter_obs_files(
     Ok(result)
 }
 
+// ─── OBS process detection / termination ─────────────────────────────────────
+
+/// Returns `true` if at least one OBS Studio process is currently running.
+pub fn is_obs_running() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let names = ["obs64.exe", "obs32.exe", "obs.exe"];
+        for name in &names {
+            if let Ok(out) = std::process::Command::new("tasklist")
+                .args(["/FO", "CSV", "/NH", "/FI", &format!("IMAGENAME eq {name}")])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if stdout.to_lowercase().contains(&name.to_lowercase()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("pgrep")
+            .args(["-ix", "obs"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
+/// Kill all running OBS Studio processes.
+/// Returns the number of process names that were targeted.
+pub fn kill_obs_processes() {
+    #[cfg(target_os = "windows")]
+    {
+        for name in &["obs64.exe", "obs32.exe", "obs.exe"] {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/IM", name])
+                .output();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("pkill").args(["-9", "-ix", "obs"]).output();
+    }
+}
+
 // ─── INI / scene-collection helpers ──────────────────────────────────────────
 
 #[allow(dead_code)]

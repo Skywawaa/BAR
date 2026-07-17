@@ -8,6 +8,14 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
+// ─── Pending action (held while OBS-running dialog is shown) ─────────────────
+
+#[derive(Clone)]
+enum PendingAction {
+    Backup,
+    Restore,
+}
+
 // ─── App state ────────────────────────────────────────────────────────────────
 
 pub struct BarApp {
@@ -24,6 +32,10 @@ pub struct BarApp {
     log: Vec<String>,
     busy: Arc<Mutex<bool>>,
     result: Arc<Mutex<Option<Result<String, String>>>>,
+
+    // OBS-running confirmation dialog
+    show_obs_dialog: bool,
+    pending_action: Option<PendingAction>,
 }
 
 impl Default for BarApp {
@@ -37,6 +49,8 @@ impl Default for BarApp {
             log: Vec::new(),
             busy: Arc::new(Mutex::new(false)),
             result: Arc::new(Mutex::new(None)),
+            show_obs_dialog: false,
+            pending_action: None,
         }
     }
 }
@@ -62,10 +76,39 @@ impl BarApp {
         }
     }
 
-    fn run_backup(&mut self, ctx: egui::Context) {
+    /// Called when the user clicks "Create Backup".
+    /// If OBS is running, show the confirmation dialog instead of starting immediately.
+    fn request_backup(&mut self, ctx: egui::Context) {
         if self.is_busy() {
             return;
         }
+        if crate::obs::is_obs_running() {
+            self.pending_action = Some(PendingAction::Backup);
+            self.show_obs_dialog = true;
+        } else {
+            self.run_backup_inner(ctx);
+        }
+    }
+
+    /// Called when the user clicks "Restore".
+    /// If OBS is running, show the confirmation dialog instead of starting immediately.
+    fn request_restore(&mut self, ctx: egui::Context) {
+        if self.is_busy() {
+            return;
+        }
+        if self.restore_zip.trim().is_empty() {
+            self.log.push("❌  Please select a backup ZIP file first.".into());
+            return;
+        }
+        if crate::obs::is_obs_running() {
+            self.pending_action = Some(PendingAction::Restore);
+            self.show_obs_dialog = true;
+        } else {
+            self.run_restore_inner(ctx);
+        }
+    }
+
+    fn run_backup_inner(&mut self, ctx: egui::Context) {
         *self.busy.lock().unwrap() = true;
         self.log.push("⏳  Starting backup…".into());
 
@@ -104,14 +147,7 @@ impl BarApp {
         });
     }
 
-    fn run_restore(&mut self, ctx: egui::Context) {
-        if self.is_busy() {
-            return;
-        }
-        if self.restore_zip.trim().is_empty() {
-            self.log.push("❌  Please select a backup ZIP file first.".into());
-            return;
-        }
+    fn run_restore_inner(&mut self, ctx: egui::Context) {
         *self.busy.lock().unwrap() = true;
         self.log
             .push(format!("⏳  Restoring from {}…", self.restore_zip.trim()));
@@ -141,6 +177,42 @@ impl BarApp {
 impl eframe::App for BarApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_result();
+
+        // ── OBS-running confirmation dialog ───────────────────────────────────
+        if self.show_obs_dialog {
+            egui::Window::new("⚠  OBS Studio is running")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label(
+                        "OBS Studio is currently running.\n\
+                         It must be closed before performing a backup or restore.\n\n\
+                         Do you want to close OBS Studio now?",
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("✅  Yes, close OBS").clicked() {
+                            self.show_obs_dialog = false;
+                            self.log.push("⏳  Closing OBS Studio…".into());
+                            crate::obs::kill_obs_processes();
+                            // Give the OS a moment to release file locks.
+                            std::thread::sleep(std::time::Duration::from_millis(800));
+                            match self.pending_action.take() {
+                                Some(PendingAction::Backup) => self.run_backup_inner(ctx.clone()),
+                                Some(PendingAction::Restore) => {
+                                    self.run_restore_inner(ctx.clone())
+                                }
+                                None => {}
+                            }
+                        }
+                        if ui.button("❌  Cancel").clicked() {
+                            self.show_obs_dialog = false;
+                            self.pending_action = None;
+                        }
+                    });
+                });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("BAR — OBS Backup & Restore");
@@ -177,7 +249,7 @@ impl eframe::App for BarApp {
                     .add_enabled(!busy, egui::Button::new("💾  Create Backup"))
                     .clicked()
                 {
-                    self.run_backup(ctx.clone());
+                    self.request_backup(ctx.clone());
                 }
             });
 
@@ -224,7 +296,7 @@ impl eframe::App for BarApp {
                     .add_enabled(!busy, egui::Button::new("♻  Restore"))
                     .clicked()
                 {
-                    self.run_restore(ctx.clone());
+                    self.request_restore(ctx.clone());
                 }
             });
 
