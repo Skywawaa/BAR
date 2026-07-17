@@ -34,12 +34,13 @@ pub fn strip_stream_key(rel_path: &str, data: Vec<u8>) -> Vec<u8> {
 // ─── Backup creation ──────────────────────────────────────────────────────────
 
 /// Create a ZIP backup of the OBS config (and referenced external assets) in
-/// `output_dir`.  Returns the path to the created ZIP file.
+/// `output_dir`.  Returns the path to the created ZIP file and a list of
+/// warnings for files that could not be read (skipped rather than aborting).
 pub fn create_local_backup_zip(
     output_dir: &Path,
     include_logs: bool,
     include_cache: bool,
-) -> Result<std::path::PathBuf> {
+) -> Result<(std::path::PathBuf, Vec<String>)> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("Cannot create output directory: {}", output_dir.display()))?;
 
@@ -53,18 +54,34 @@ pub fn create_local_backup_zip(
         .compression_method(CompressionMethod::Deflated)
         .compression_level(Some(6));
 
+    let mut warnings: Vec<String> = Vec::new();
+
     // ── OBS config files ──
     let obs_files = obs::iter_obs_files(include_logs, include_cache)?;
     eprintln!("  Adding {} config files...", obs_files.len());
     for (rel, src) in &obs_files {
-        let data = std::fs::read(src)
-            .with_context(|| format!("Cannot read {}", src.display()))?;
+        let data = match std::fs::read(src) {
+            Ok(d) => d,
+            Err(e) => {
+                let msg = format!("Skipped (cannot read): {} — {e}", src.display());
+                eprintln!("  Warning: {msg}");
+                warnings.push(msg);
+                continue;
+            }
+        };
         let data = strip_stream_key(rel, data);
         let entry_name = format!("{folder_name}/obs-studio/{rel}");
-        zw.start_file(&entry_name, options)
-            .with_context(|| format!("Cannot write ZIP entry: {entry_name}"))?;
-        zw.write_all(&data)
-            .with_context(|| format!("Cannot write data for: {entry_name}"))?;
+        if let Err(e) = zw.start_file(&entry_name, options) {
+            let msg = format!("Skipped (ZIP entry error): {entry_name} — {e}");
+            eprintln!("  Warning: {msg}");
+            warnings.push(msg);
+            continue;
+        }
+        if let Err(e) = zw.write_all(&data) {
+            let msg = format!("Skipped (write error): {entry_name} — {e}");
+            eprintln!("  Warning: {msg}");
+            warnings.push(msg);
+        }
     }
 
     // ── External assets ──
@@ -86,7 +103,12 @@ pub fn create_local_backup_zip(
                     }
                 }
                 Err(e) => {
-                    eprintln!("  Warning: cannot read {}: {e}", asset.source_path.display());
+                    let msg = format!(
+                        "Skipped asset (cannot read): {} — {e}",
+                        asset.source_path.display()
+                    );
+                    eprintln!("  Warning: {msg}");
+                    warnings.push(msg);
                 }
             }
         }
@@ -106,5 +128,5 @@ pub fn create_local_backup_zip(
     }
 
     zw.finish().context("Cannot finalise ZIP file")?;
-    Ok(zip_path)
+    Ok((zip_path, warnings))
 }

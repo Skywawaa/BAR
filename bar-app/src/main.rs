@@ -68,6 +68,7 @@ fn main() -> Result<()> {
             let zip_path =
                 backup::create_local_backup_zip(&output_dir, include_logs, include_cache)?;
 
+            let (zip_path, warnings) = zip_path;
             let size_mb = std::fs::metadata(&zip_path)
                 .map(|m| m.len() as f64 / 1_048_576.0)
                 .unwrap_or(0.0);
@@ -77,6 +78,13 @@ fn main() -> Result<()> {
                 zip_path.display(),
                 size_mb
             );
+            if !warnings.is_empty() {
+                eprintln!();
+                eprintln!("⚠  {} file(s) were skipped:", warnings.len());
+                for w in &warnings {
+                    eprintln!("   • {w}");
+                }
+            }
         }
 
         Commands::Restore {
