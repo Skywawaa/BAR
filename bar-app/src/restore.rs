@@ -160,6 +160,40 @@ pub fn repath_obs_json_files(obs_config_dir: &Path, path_mapping: &HashMap<Strin
                 replacements.push((old_f.to_string(), new_f.to_string()));
             }
         }
+
+        // If old path has the Windows extended-length prefix (\\?\), also add
+        // replacements for the version without it.  OBS config files never
+        // include \\?\ but old manifests (created before this fix) may store
+        // canonicalised paths with that prefix.
+        if let Some(stripped) = old.strip_prefix(assets::WINDOWS_EXTENDED_PATH_PREFIX) {
+            let stripped_old_json = serde_json::to_string(stripped).unwrap_or_default();
+            let new_json = serde_json::to_string(new).unwrap_or_default();
+            if stripped_old_json.len() >= 2 && new_json.len() >= 2 {
+                let stripped_old_json = &stripped_old_json[1..stripped_old_json.len() - 1];
+                let new_json = &new_json[1..new_json.len() - 1];
+                if !stripped_old_json.is_empty() && stripped_old_json != old_j {
+                    replacements.push((stripped_old_json.to_string(), new_json.to_string()));
+                }
+                // Forward-slash variant of the stripped path.
+                let stripped_fwd = stripped.replace('\\', "/");
+                let new_fwd = new.replace('\\', "/");
+                let stripped_fwd_json = serde_json::to_string(&stripped_fwd).unwrap_or_default();
+                let new_fwd_json = serde_json::to_string(&new_fwd).unwrap_or_default();
+                if stripped_fwd_json.len() >= 2 && new_fwd_json.len() >= 2 {
+                    let stripped_fwd_json = &stripped_fwd_json[1..stripped_fwd_json.len() - 1];
+                    let new_fwd_json = &new_fwd_json[1..new_fwd_json.len() - 1];
+                    if !stripped_fwd_json.is_empty()
+                        && stripped_fwd_json != old_j
+                        && stripped_fwd_json != stripped_old_json
+                    {
+                        replacements.push((
+                            stripped_fwd_json.to_string(),
+                            new_fwd_json.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     let mut repathed = 0usize;
@@ -220,7 +254,23 @@ fn restore_external_assets(
     let mut path_mapping = HashMap::new();
     for entry in &manifest.files {
         let original = &entry.original_path;
-        let src = backup_root.join(&entry.backup_path);
+        // Resolve the file within the extracted backup.  Old backups may
+        // store paths like "C:Users/…" (no separator after the drive
+        // letter); apply the same normalisation used during ZIP extraction
+        // so we can still find the file.  If neither form exists we fall
+        // back to the raw path so the "missing asset" warning below is
+        // triggered with the original backup_path for clarity.
+        let src = {
+            let direct = backup_root.join(&entry.backup_path);
+            if direct.exists() {
+                direct
+            } else {
+                normalize_zip_entry_path(&entry.backup_path)
+                    .map(|norm| backup_root.join(&norm))
+                    .filter(|p| p.exists())
+                    .unwrap_or_else(|| backup_root.join(&entry.backup_path))
+            }
+        };
         if !src.exists() {
             eprintln!("  Warning: missing external asset in backup: {}", entry.backup_path);
             continue;
@@ -419,7 +469,87 @@ pub fn restore_from_zip(zip_path: &Path, restore_assets_dir: Option<&Path>) -> R
         repath_obs_json_files(&obs_cfg, &path_mapping);
     }
 
+    // Restore OBS plugin files (present only in backups created with
+    // --include-plugins / the "Include plugins" checkbox).
+    let plugins_backup_dir = backup_root.join(obs::OBS_INSTALL_BACKUP_PREFIX);
+    if plugins_backup_dir.exists() {
+        match obs::get_obs_install_dir() {
+            Some(install_dir) => {
+                eprintln!("  Restoring plugin files to {}...", install_dir.display());
+                restore_obs_install_files(&plugins_backup_dir, &install_dir);
+            }
+            None => {
+                eprintln!(
+                    "  Warning: OBS installation directory not found; \
+                     plugin files could not be restored automatically."
+                );
+                eprintln!(
+                    "  The plugin files are available in the backup under '{}'.",
+                    obs::OBS_INSTALL_BACKUP_PREFIX
+                );
+            }
+        }
+    }
+
     Ok(())
+}
+
+// ─── Plugin restore ───────────────────────────────────────────────────────────
+
+/// Copy files from `plugins_backup_dir` (extracted from the backup ZIP) into
+/// `install_dir` (the OBS installation directory on the target machine).
+fn restore_obs_install_files(plugins_backup_dir: &Path, install_dir: &Path) {
+    let mut restored = 0usize;
+    let mut failed = 0usize;
+    for entry in walkdir::WalkDir::new(plugins_backup_dir)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let src = entry.path();
+        let rel = match src.strip_prefix(plugins_backup_dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let dest = install_dir.join(rel);
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "  Warning: cannot create plugin directory {}: {e}",
+                    parent.display()
+                );
+                failed += 1;
+                continue;
+            }
+        }
+        match std::fs::copy(src, &dest) {
+            Ok(_) => restored += 1,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    eprintln!(
+                        "  Warning: permission denied writing {} — \
+                         try running BAR as administrator to restore plugin files.",
+                        dest.display()
+                    );
+                } else {
+                    eprintln!(
+                        "  Warning: cannot restore plugin file {}: {e}",
+                        dest.display()
+                    );
+                }
+                failed += 1;
+            }
+        }
+    }
+    if restored > 0 {
+        eprintln!("  Restored {restored} plugin file(s).");
+    }
+    if failed > 0 {
+        eprintln!("  {failed} plugin file(s) could not be restored (see warnings above).");
+    }
 }
 
 // ─── Utility: recursive directory copy ───────────────────────────────────────

@@ -34,6 +34,10 @@ enum Commands {
         /// Include cache files in the backup (produces a larger archive)
         #[arg(long)]
         include_cache: bool,
+        /// Include OBS plugin binaries from the installation directory
+        /// (obs-plugins/ and data/obs-plugins/; Windows only)
+        #[arg(long)]
+        include_plugins: bool,
     },
     /// Restore OBS Studio configuration from a backup ZIP
     Restore {
@@ -54,6 +58,7 @@ fn main() -> Result<()> {
             output,
             include_logs,
             include_cache,
+            include_plugins,
         } => {
             let obs_cfg = obs::get_obs_config_dir()?;
             let output_dir = output.unwrap_or_else(|| {
@@ -66,7 +71,7 @@ fn main() -> Result<()> {
             eprintln!("Output dir : {}", output_dir.display());
 
             let zip_path =
-                backup::create_local_backup_zip(&output_dir, include_logs, include_cache)?;
+                backup::create_local_backup_zip(&output_dir, include_logs, include_cache, include_plugins)?;
 
             let (zip_path, warnings) = zip_path;
             let size_mb = std::fs::metadata(&zip_path)

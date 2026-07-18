@@ -23,6 +23,7 @@ pub struct BarApp {
     backup_output: String,
     include_logs: bool,
     include_cache: bool,
+    include_plugins: bool,
 
     // Restore fields
     restore_zip: String,
@@ -44,6 +45,7 @@ impl Default for BarApp {
             backup_output: String::new(),
             include_logs: false,
             include_cache: false,
+            include_plugins: false,
             restore_zip: String::new(),
             restore_assets: String::new(),
             log: Vec::new(),
@@ -130,6 +132,7 @@ impl BarApp {
         };
         let include_logs = self.include_logs;
         let include_cache = self.include_cache;
+        let include_plugins = self.include_plugins;
         let result = Arc::clone(&self.result);
 
         std::thread::spawn(move || {
@@ -139,7 +142,7 @@ impl BarApp {
                     .join("obs-backups")
             });
             let res =
-                crate::backup::create_local_backup_zip(&output_dir, include_logs, include_cache);
+                crate::backup::create_local_backup_zip(&output_dir, include_logs, include_cache, include_plugins);
             let msg = match res {
                 Ok((path, warnings)) => {
                     let size = std::fs::metadata(&path)
@@ -252,6 +255,11 @@ impl eframe::App for BarApp {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.include_logs, "Include logs");
                     ui.checkbox(&mut self.include_cache, "Include cache");
+                    ui.checkbox(&mut self.include_plugins, "Include plugins")
+                        .on_hover_text(
+                            "Back up OBS plugin binaries from the installation directory\n\
+                             (obs-plugins/ and data/obs-plugins/). Windows only.",
+                        );
                 });
 
                 ui.add_space(4.0);

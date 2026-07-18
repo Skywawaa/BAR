@@ -10,6 +10,18 @@ pub const EXTERNAL_ASSETS_DIR: &str = "external-assets";
 pub const MANIFEST_FILE: &str = "external-assets.json";
 pub const MANIFEST_VERSION: u32 = 1;
 
+/// The Windows extended-length path prefix added by `std::fs::canonicalize()`.
+/// OBS config files never contain this prefix; it must be stripped when
+/// storing paths in manifests or matching them in JSON config files.
+pub const WINDOWS_EXTENDED_PATH_PREFIX: &str = "\\\\?\\";
+
+/// The UNC segment that follows `WINDOWS_EXTENDED_PATH_PREFIX` in extended UNC
+/// paths (`\\?\UNC\server\share\...`).
+pub const WINDOWS_EXTENDED_UNC_SEGMENT: &str = "UNC\\";
+
+/// Full extended-UNC prefix (`\\?\UNC\`).
+pub const WINDOWS_EXTENDED_UNC_PREFIX: &str = "\\\\?\\UNC\\";
+
 // ─── Structs ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -34,7 +46,16 @@ pub struct AssetsManifest {
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
 
+/// Strip `WINDOWS_EXTENDED_PATH_PREFIX` (`\\?\`) from `s`, if present.
+/// Returns a subslice of `s` so no allocation is needed.
+fn strip_extended_prefix(s: &str) -> &str {
+    s.strip_prefix(WINDOWS_EXTENDED_PATH_PREFIX).unwrap_or(s)
+}
+
 pub fn looks_like_windows_abs_path(s: &str) -> bool {
+    // Strip extended-length path prefix (\\?\) before checking so that
+    // \\?\C:\... is recognised as a drive path rather than a UNC path.
+    let s = strip_extended_prefix(s);
     // Drive letter path: C:\ or C:/
     let b = s.as_bytes();
     if b.len() >= 3
@@ -49,6 +70,23 @@ pub fn looks_like_windows_abs_path(s: &str) -> bool {
 }
 
 pub fn windows_path_flat_parts(raw: &str) -> Vec<String> {
+    // Strip extended-length path prefix (\\?\) before splitting.
+    // \\?\C:\...   → C:\...   (drive path)
+    // \\?\UNC\s\r  → treat as UNC (use the server\share\... portion directly;
+    //                the existing UNC branch below reconstructs parts from it)
+    let raw: &str = if let Some(rest) = raw.strip_prefix(WINDOWS_EXTENDED_PATH_PREFIX) {
+        if let Some(unc) = rest.strip_prefix(WINDOWS_EXTENDED_UNC_SEGMENT) {
+            // Drop the \\?\ and UNC\ prefixes; `raw` is now "server\share\..."
+            // The UNC branch further below still handles it correctly because
+            // it trims any leading backslashes before splitting.
+            unc
+        } else {
+            rest
+        }
+    } else {
+        raw
+    };
+
     if raw.starts_with("\\\\") {
         // UNC: \\server\share\...
         return raw
@@ -126,7 +164,25 @@ pub fn normalize_asset_path(value: &str) -> Option<PathBuf> {
     if !candidate.exists() || !candidate.is_file() {
         return None;
     }
-    candidate.canonicalize().ok()
+    let canonical = candidate.canonicalize().ok()?;
+    // Rust's canonicalize() on Windows returns extended-length paths
+    // (\\?\C:\...).  Strip that prefix so original_path in manifests and
+    // repath replacements match what OBS config files actually contain.
+    #[cfg(target_os = "windows")]
+    let canonical = {
+        let s = canonical.to_string_lossy();
+        // \\?\UNC\server\share → \\server\share
+        // \\?\C:\...          → C:\...
+        let clean = s
+            .strip_prefix(WINDOWS_EXTENDED_UNC_PREFIX)
+            .map(|unc| format!("\\\\{unc}"))
+            .or_else(|| s.strip_prefix(WINDOWS_EXTENDED_PATH_PREFIX).map(str::to_owned));
+        match clean {
+            Some(p) => PathBuf::from(p),
+            None => canonical,
+        }
+    };
+    Some(canonical)
 }
 
 /// Recursively collect all string leaves from a JSON value.
