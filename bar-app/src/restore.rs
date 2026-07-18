@@ -83,6 +83,41 @@ fn path_to_file_url(path_str: &str) -> String {
     }
 }
 
+fn normalize_zip_entry_path(entry_name: &str) -> Option<PathBuf> {
+    if entry_name.starts_with('/') || entry_name.starts_with("\\\\") {
+        return None;
+    }
+    let mut out_parts: Vec<String> = Vec::new();
+    for seg in entry_name.replace('\\', "/").split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            return None;
+        }
+        if seg.len() >= 2
+            && seg.as_bytes()[0].is_ascii_alphabetic()
+            && seg.as_bytes()[1] == b':'
+        {
+            out_parts.push(seg[..1].to_string());
+            let rest = &seg[2..];
+            if !rest.is_empty() {
+                out_parts.push(rest.to_string());
+            }
+            continue;
+        }
+        out_parts.push(seg.to_string());
+    }
+    if out_parts.is_empty() {
+        return None;
+    }
+    let mut rel = PathBuf::new();
+    for part in &out_parts {
+        rel.push(part);
+    }
+    Some(rel)
+}
+
 // ─── JSON re-pathing ──────────────────────────────────────────────────────────
 
 /// Rewrite absolute paths in all OBS JSON config files based on `path_mapping`
@@ -293,27 +328,46 @@ pub fn restore_from_zip(zip_path: &Path, restore_assets_dir: Option<&Path>) -> R
             if entry_name.ends_with('/') {
                 continue; // directory entry
             }
-            // Sanitise: skip absolute paths and any component with '..'
-            if entry_name.starts_with('/') || entry_name.starts_with("\\\\") {
+            let Some(rel_path) = normalize_zip_entry_path(&entry_name) else {
                 continue;
-            }
-            if entry_name
-                .split(|c| c == '/' || c == '\\')
-                .any(|seg| seg == "..")
-            {
-                continue;
-            }
-            let dest = tmp_path.join(&entry_name);
+            };
+            let dest = tmp_path.join(rel_path);
             if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("Cannot create {}", parent.display()))?;
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "  Warning: skipping ZIP entry '{}' (cannot create '{}': {e})",
+                        entry_name,
+                        parent.display()
+                    );
+                    continue;
+                }
             }
-            let mut out = std::fs::File::create(&dest)
-                .with_context(|| format!("Cannot create {}", dest.display()))?;
+            let mut out = match std::fs::File::create(&dest) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!(
+                        "  Warning: skipping ZIP entry '{}' (cannot create '{}': {e})",
+                        entry_name,
+                        dest.display()
+                    );
+                    continue;
+                }
+            };
             let mut buf = Vec::new();
-            entry.read_to_end(&mut buf).context("Cannot read ZIP entry data")?;
-            std::io::Write::write_all(&mut out, &buf)
-                .with_context(|| format!("Cannot write {}", dest.display()))?;
+            if let Err(e) = entry.read_to_end(&mut buf) {
+                eprintln!(
+                    "  Warning: skipping ZIP entry '{}' (cannot read entry data: {e})",
+                    entry_name
+                );
+                continue;
+            }
+            if let Err(e) = std::io::Write::write_all(&mut out, &buf) {
+                eprintln!(
+                    "  Warning: skipping ZIP entry '{}' (cannot write '{}': {e})",
+                    entry_name,
+                    dest.display()
+                );
+            }
         }
     }
 
