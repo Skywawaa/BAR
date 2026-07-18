@@ -35,6 +35,9 @@ pub struct AssetsManifest {
 // ─── Path helpers ─────────────────────────────────────────────────────────────
 
 pub fn looks_like_windows_abs_path(s: &str) -> bool {
+    // Strip extended-length path prefix (\\?\) before checking so that
+    // \\?\C:\... is recognised as a drive path rather than a UNC path.
+    let s = if s.starts_with("\\\\?\\") { &s[4..] } else { s };
     // Drive letter path: C:\ or C:/
     let b = s.as_bytes();
     if b.len() >= 3
@@ -49,6 +52,22 @@ pub fn looks_like_windows_abs_path(s: &str) -> bool {
 }
 
 pub fn windows_path_flat_parts(raw: &str) -> Vec<String> {
+    // Strip extended-length path prefix (\\?\) before splitting.
+    // \\?\C:\...   → C:\...   (drive path)
+    // \\?\UNC\s\r  → \\s\r   (UNC path — re-add leading \\)
+    let raw: &str = if let Some(rest) = raw.strip_prefix("\\\\?\\") {
+        if let Some(unc) = rest.strip_prefix("UNC\\") {
+            // We can't easily return an owned String here, so just use
+            // unc directly (server\share\... without the leading \\).
+            // The caller in backup_rel_for_external_asset handles UNC.
+            unc
+        } else {
+            rest
+        }
+    } else {
+        raw
+    };
+
     if raw.starts_with("\\\\") {
         // UNC: \\server\share\...
         return raw
@@ -126,7 +145,24 @@ pub fn normalize_asset_path(value: &str) -> Option<PathBuf> {
     if !candidate.exists() || !candidate.is_file() {
         return None;
     }
-    candidate.canonicalize().ok()
+    let canonical = candidate.canonicalize().ok()?;
+    // Rust's canonicalize() on Windows returns extended-length paths
+    // (\\?\C:\...).  Strip that prefix so original_path in manifests and
+    // repath replacements match what OBS config files actually contain.
+    #[cfg(target_os = "windows")]
+    let canonical = {
+        let s = canonical.to_string_lossy();
+        if let Some(rest) = s.strip_prefix("\\\\?\\") {
+            if let Some(unc) = rest.strip_prefix("UNC\\") {
+                PathBuf::from(format!("\\\\{unc}"))
+            } else {
+                PathBuf::from(rest)
+            }
+        } else {
+            canonical
+        }
+    };
+    Some(canonical)
 }
 
 /// Recursively collect all string leaves from a JSON value.

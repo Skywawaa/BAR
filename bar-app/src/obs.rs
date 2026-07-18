@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/// ZIP folder prefix for OBS installation files (plugins, data).
+pub const OBS_INSTALL_BACKUP_PREFIX: &str = "obs-install";
+
 // ─── Home / OBS config directories ───────────────────────────────────────────
 
 pub fn home_dir() -> Result<PathBuf> {
@@ -329,4 +334,111 @@ pub fn get_active_collection_name(obs_config_root: &Path) -> Option<String> {
         }
     }
     None
+}
+
+// ─── OBS installation directory and plugin files ──────────────────────────────
+
+/// Find the OBS Studio installation directory.
+///
+/// On Windows this checks common installation paths and falls back to
+/// searching for `obs64.exe` via `where`.  Returns `None` if the
+/// installation cannot be located.
+pub fn get_obs_install_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        // Build a list of candidate directories.
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            candidates.push(PathBuf::from(pf).join("obs-studio"));
+        }
+        if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
+            candidates.push(PathBuf::from(pf86).join("obs-studio"));
+        }
+        // Fallbacks for non-standard %ProgramFiles% values.
+        candidates.push(PathBuf::from(r"C:\Program Files\obs-studio"));
+        candidates.push(PathBuf::from(r"C:\Program Files (x86)\obs-studio"));
+
+        for c in &candidates {
+            // Consider valid if the obs-plugins folder or the 64-bit binary exists.
+            if c.join("obs-plugins").exists()
+                || c.join("bin").join("64bit").join("obs64.exe").exists()
+                || c.join("obs64.exe").exists()
+            {
+                return Some(c.clone());
+            }
+        }
+
+        // Last resort: ask the shell where obs64.exe lives.
+        if let Ok(out) = std::process::Command::new("where")
+            .args(["/F", "obs64.exe"])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if let Some(line) = s.lines().next() {
+                let line = line.trim().trim_matches('"');
+                if !line.is_empty() {
+                    let p = PathBuf::from(line);
+                    // obs64.exe lives in <install>\bin\64bit\ (3 levels up) or
+                    // directly in <install>\bin\ (2 levels up).
+                    for levels in 2usize..=3 {
+                        let mut install = p.clone();
+                        for _ in 0..levels {
+                            if let Some(parent) = install.parent() {
+                                install = parent.to_path_buf();
+                            }
+                        }
+                        if install.join("obs-plugins").exists() {
+                            return Some(install);
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    { None }
+}
+
+/// Yields `(zip_rel_posix, absolute_path)` for every file in the OBS
+/// installation's plugin directories that should be included in a backup.
+///
+/// The returned `zip_rel_posix` paths are relative and prefixed with
+/// [`OBS_INSTALL_BACKUP_PREFIX`] so they land under
+/// `<backup_folder>/obs-install/…` in the ZIP archive.
+pub fn iter_obs_install_files() -> Vec<(String, PathBuf)> {
+    let Some(install_dir) = get_obs_install_dir() else {
+        return Vec::new();
+    };
+
+    // Back up the plugin binaries and their data assets.  These are the two
+    // subdirectories that third-party OBS plugins populate.
+    let plugin_subdirs = ["obs-plugins", "data/obs-plugins"];
+
+    let mut result = Vec::new();
+    for subdir in &plugin_subdirs {
+        // PathBuf::join with a forward-slash path works on Windows because
+        // Windows accepts both separators.
+        let dir = install_dir.join(subdir);
+        if !dir.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&dir).follow_links(false).into_iter().flatten() {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let abs = entry.path().to_path_buf();
+            let rel_from_install = abs
+                .strip_prefix(&install_dir)
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if rel_from_install.is_empty() {
+                continue;
+            }
+            let zip_rel = format!("{OBS_INSTALL_BACKUP_PREFIX}/{rel_from_install}");
+            result.push((zip_rel, abs));
+        }
+    }
+    result
 }

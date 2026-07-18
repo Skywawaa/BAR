@@ -40,6 +40,7 @@ pub fn create_local_backup_zip(
     output_dir: &Path,
     include_logs: bool,
     include_cache: bool,
+    include_plugins: bool,
 ) -> Result<(std::path::PathBuf, Vec<String>)> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("Cannot create output directory: {}", output_dir.display()))?;
@@ -125,6 +126,42 @@ pub fn create_local_backup_zip(
             .context("Cannot write manifest ZIP entry")?;
         zw.write_all(&manifest_json)
             .context("Cannot write manifest data")?;
+    }
+
+    // ── OBS plugin files ──
+    if include_plugins {
+        let install_files = obs::iter_obs_install_files();
+        if install_files.is_empty() {
+            eprintln!("  Note: OBS installation directory not found; skipping plugin backup.");
+        } else {
+            eprintln!("  Adding {} OBS plugin/install file(s)...", install_files.len());
+            for (rel, src) in &install_files {
+                let data = match std::fs::read(src) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let msg = format!(
+                            "Skipped plugin file (cannot read): {} — {e}",
+                            src.display()
+                        );
+                        eprintln!("  Warning: {msg}");
+                        warnings.push(msg);
+                        continue;
+                    }
+                };
+                let entry_name = format!("{folder_name}/{rel}");
+                if let Err(e) = zw.start_file(&entry_name, options) {
+                    let msg = format!("Skipped plugin file (ZIP entry error): {entry_name} — {e}");
+                    eprintln!("  Warning: {msg}");
+                    warnings.push(msg);
+                    continue;
+                }
+                if let Err(e) = zw.write_all(&data) {
+                    let msg = format!("Skipped plugin file (write error): {entry_name} — {e}");
+                    eprintln!("  Warning: {msg}");
+                    warnings.push(msg);
+                }
+            }
+        }
     }
 
     zw.finish().context("Cannot finalise ZIP file")?;
