@@ -418,8 +418,8 @@ pub fn iter_obs_install_files() -> Vec<(String, PathBuf)> {
 
     let mut result = Vec::new();
     for subdir in &plugin_subdirs {
-        // PathBuf::join with a forward-slash path works on Windows because
-        // Windows accepts both separators.
+        // install_dir.join("data/obs-plugins") works on all platforms:
+        // Windows accepts forward slashes as path separators.
         let dir = install_dir.join(subdir);
         if !dir.exists() {
             continue;

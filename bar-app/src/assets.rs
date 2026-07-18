@@ -37,7 +37,7 @@ pub struct AssetsManifest {
 pub fn looks_like_windows_abs_path(s: &str) -> bool {
     // Strip extended-length path prefix (\\?\) before checking so that
     // \\?\C:\... is recognised as a drive path rather than a UNC path.
-    let s = if s.starts_with("\\\\?\\") { &s[4..] } else { s };
+    let s = s.strip_prefix("\\\\?\\").unwrap_or(s);
     // Drive letter path: C:\ or C:/
     let b = s.as_bytes();
     if b.len() >= 3
@@ -152,14 +152,15 @@ pub fn normalize_asset_path(value: &str) -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     let canonical = {
         let s = canonical.to_string_lossy();
-        if let Some(rest) = s.strip_prefix("\\\\?\\") {
-            if let Some(unc) = rest.strip_prefix("UNC\\") {
-                PathBuf::from(format!("\\\\{unc}"))
-            } else {
-                PathBuf::from(rest)
-            }
-        } else {
-            canonical
+        // \\?\UNC\server\share → \\server\share
+        // \\?\C:\...          → C:\...
+        let clean = s
+            .strip_prefix("\\\\?\\UNC\\")
+            .map(|unc| format!("\\\\{unc}"))
+            .or_else(|| s.strip_prefix("\\\\?\\").map(str::to_owned));
+        match clean {
+            Some(p) => PathBuf::from(p),
+            None => canonical,
         }
     };
     Some(canonical)
