@@ -95,11 +95,14 @@ fn normalize_zip_entry_path(entry_name: &str) -> Option<PathBuf> {
         if seg == ".." {
             return None;
         }
-        if seg.len() >= 2
-            && seg.as_bytes()[0].is_ascii_alphabetic()
-            && seg.as_bytes()[1] == b':'
+        // Normalize legacy Windows drive-prefix segments such as "C:Users"
+        // into "C/Users" so they become valid relative ZIP paths.
+        let seg_bytes = seg.as_bytes();
+        if seg_bytes.len() >= 2
+            && seg_bytes[0].is_ascii_alphabetic()
+            && seg_bytes[1] == b':'
         {
-            out_parts.push(seg[..1].to_string());
+            out_parts.push((seg_bytes[0] as char).to_string());
             let rest = &seg[2..];
             if !rest.is_empty() {
                 out_parts.push(rest.to_string());
@@ -111,10 +114,7 @@ fn normalize_zip_entry_path(entry_name: &str) -> Option<PathBuf> {
     if out_parts.is_empty() {
         return None;
     }
-    let mut rel = PathBuf::new();
-    for part in &out_parts {
-        rel.push(part);
-    }
+    let rel = out_parts.iter().collect::<PathBuf>();
     Some(rel)
 }
 
@@ -359,6 +359,7 @@ pub fn restore_from_zip(zip_path: &Path, restore_assets_dir: Option<&Path>) -> R
                     "  Warning: skipping ZIP entry '{}' (cannot read entry data: {e})",
                     entry_name
                 );
+                let _ = std::fs::remove_file(&dest);
                 continue;
             }
             if let Err(e) = std::io::Write::write_all(&mut out, &buf) {
@@ -367,6 +368,8 @@ pub fn restore_from_zip(zip_path: &Path, restore_assets_dir: Option<&Path>) -> R
                     entry_name,
                     dest.display()
                 );
+                let _ = std::fs::remove_file(&dest);
+                continue;
             }
         }
     }
