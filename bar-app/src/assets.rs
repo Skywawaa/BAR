@@ -15,6 +15,13 @@ pub const MANIFEST_VERSION: u32 = 1;
 /// storing paths in manifests or matching them in JSON config files.
 pub const WINDOWS_EXTENDED_PATH_PREFIX: &str = "\\\\?\\";
 
+/// The UNC segment that follows `WINDOWS_EXTENDED_PATH_PREFIX` in extended UNC
+/// paths (`\\?\UNC\server\share\...`).
+pub const WINDOWS_EXTENDED_UNC_SEGMENT: &str = "UNC\\";
+
+/// Full extended-UNC prefix (`\\?\UNC\`).
+pub const WINDOWS_EXTENDED_UNC_PREFIX: &str = "\\\\?\\UNC\\";
+
 // ─── Structs ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -68,7 +75,7 @@ pub fn windows_path_flat_parts(raw: &str) -> Vec<String> {
     // \\?\UNC\s\r  → treat as UNC (use the server\share\... portion directly;
     //                the existing UNC branch below reconstructs parts from it)
     let raw: &str = if let Some(rest) = raw.strip_prefix(WINDOWS_EXTENDED_PATH_PREFIX) {
-        if let Some(unc) = rest.strip_prefix("UNC\\") {
+        if let Some(unc) = rest.strip_prefix(WINDOWS_EXTENDED_UNC_SEGMENT) {
             // Drop the \\?\ and UNC\ prefixes; `raw` is now "server\share\..."
             // The UNC branch further below still handles it correctly because
             // it trims any leading backslashes before splitting.
@@ -166,9 +173,8 @@ pub fn normalize_asset_path(value: &str) -> Option<PathBuf> {
         let s = canonical.to_string_lossy();
         // \\?\UNC\server\share → \\server\share
         // \\?\C:\...          → C:\...
-        let unc_prefix = format!("{WINDOWS_EXTENDED_PATH_PREFIX}UNC\\");
         let clean = s
-            .strip_prefix(unc_prefix.as_str())
+            .strip_prefix(WINDOWS_EXTENDED_UNC_PREFIX)
             .map(|unc| format!("\\\\{unc}"))
             .or_else(|| s.strip_prefix(WINDOWS_EXTENDED_PATH_PREFIX).map(str::to_owned));
         match clean {

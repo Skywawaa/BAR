@@ -166,24 +166,30 @@ pub fn repath_obs_json_files(obs_config_dir: &Path, path_mapping: &HashMap<Strin
         // include \\?\ but old manifests (created before this fix) may store
         // canonicalised paths with that prefix.
         if let Some(stripped) = old.strip_prefix(assets::WINDOWS_EXTENDED_PATH_PREFIX) {
-            let old_s_j = serde_json::to_string(stripped).unwrap_or_default();
-            let new_j2 = serde_json::to_string(new).unwrap_or_default();
-            if old_s_j.len() >= 2 && new_j2.len() >= 2 {
-                let old_s_j = &old_s_j[1..old_s_j.len() - 1];
-                let new_j2 = &new_j2[1..new_j2.len() - 1];
-                if !old_s_j.is_empty() && old_s_j != old_j {
-                    replacements.push((old_s_j.to_string(), new_j2.to_string()));
+            let stripped_old_json = serde_json::to_string(stripped).unwrap_or_default();
+            let new_json = serde_json::to_string(new).unwrap_or_default();
+            if stripped_old_json.len() >= 2 && new_json.len() >= 2 {
+                let stripped_old_json = &stripped_old_json[1..stripped_old_json.len() - 1];
+                let new_json = &new_json[1..new_json.len() - 1];
+                if !stripped_old_json.is_empty() && stripped_old_json != old_j {
+                    replacements.push((stripped_old_json.to_string(), new_json.to_string()));
                 }
                 // Forward-slash variant of the stripped path.
                 let stripped_fwd = stripped.replace('\\', "/");
-                let new_fwd2 = new.replace('\\', "/");
-                let old_sf = serde_json::to_string(&stripped_fwd).unwrap_or_default();
-                let new_sf = serde_json::to_string(&new_fwd2).unwrap_or_default();
-                if old_sf.len() >= 2 && new_sf.len() >= 2 {
-                    let old_sf = &old_sf[1..old_sf.len() - 1];
-                    let new_sf = &new_sf[1..new_sf.len() - 1];
-                    if !old_sf.is_empty() && old_sf != old_j && old_sf != old_s_j {
-                        replacements.push((old_sf.to_string(), new_sf.to_string()));
+                let new_fwd = new.replace('\\', "/");
+                let stripped_fwd_json = serde_json::to_string(&stripped_fwd).unwrap_or_default();
+                let new_fwd_json = serde_json::to_string(&new_fwd).unwrap_or_default();
+                if stripped_fwd_json.len() >= 2 && new_fwd_json.len() >= 2 {
+                    let stripped_fwd_json = &stripped_fwd_json[1..stripped_fwd_json.len() - 1];
+                    let new_fwd_json = &new_fwd_json[1..new_fwd_json.len() - 1];
+                    if !stripped_fwd_json.is_empty()
+                        && stripped_fwd_json != old_j
+                        && stripped_fwd_json != stripped_old_json
+                    {
+                        replacements.push((
+                            stripped_fwd_json.to_string(),
+                            new_fwd_json.to_string(),
+                        ));
                     }
                 }
             }
@@ -259,10 +265,6 @@ fn restore_external_assets(
             if direct.exists() {
                 direct
             } else {
-                // normalize_zip_entry_path applies the same fix used during ZIP
-                // extraction: it splits malformed segments like "C:Users" (no
-                // separator after the drive letter) into "C" + "Users" so the
-                // resulting path matches where the file was actually extracted.
                 normalize_zip_entry_path(&entry.backup_path)
                     .map(|norm| backup_root.join(&norm))
                     .filter(|p| p.exists())
