@@ -165,7 +165,7 @@ pub fn repath_obs_json_files(obs_config_dir: &Path, path_mapping: &HashMap<Strin
         // replacements for the version without it.  OBS config files never
         // include \\?\ but old manifests (created before this fix) may store
         // canonicalised paths with that prefix.
-        if let Some(stripped) = old.strip_prefix("\\\\?\\") {
+        if let Some(stripped) = old.strip_prefix(assets::WINDOWS_EXTENDED_PATH_PREFIX) {
             let old_s_j = serde_json::to_string(stripped).unwrap_or_default();
             let new_j2 = serde_json::to_string(new).unwrap_or_default();
             if old_s_j.len() >= 2 && new_j2.len() >= 2 {
@@ -259,6 +259,10 @@ fn restore_external_assets(
             if direct.exists() {
                 direct
             } else {
+                // normalize_zip_entry_path applies the same fix used during ZIP
+                // extraction: it splits malformed segments like "C:Users" (no
+                // separator after the drive letter) into "C" + "Users" so the
+                // resulting path matches where the file was actually extracted.
                 normalize_zip_entry_path(&entry.backup_path)
                     .map(|norm| backup_root.join(&norm))
                     .filter(|p| p.exists())
