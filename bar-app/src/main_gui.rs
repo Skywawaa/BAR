@@ -19,7 +19,7 @@ fn show_error(msg: &str) {
         use std::os::windows::ffi::OsStrExt;
 
         let text: Vec<u16> = OsStr::new(msg).encode_wide().chain(once(0)).collect();
-        let caption: Vec<u16> = OsStr::new("BAR — Error")
+        let caption: Vec<u16> = OsStr::new("BAR - Error")
             .encode_wide()
             .chain(once(0))
             .collect();
@@ -39,7 +39,7 @@ fn show_error(msg: &str) {
         unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x10) };
     }
     #[cfg(not(target_os = "windows"))]
-    eprintln!("BAR error: {msg}");
+    eprintln!("BAR - Error: {msg}");
 }
 
 fn main() {
