@@ -320,6 +320,29 @@ def _needs_repath(original_path: str) -> bool:
     return _looks_like_windows_absolute_path(original_path)
 
 
+def _remap_windows_user_path(original_path: str) -> Path | None:
+    """Try to remap a Windows user-profile path to the current user's home directory.
+
+    For a path like ``C:\\Users\\<any_user>\\<sub>\\...`` returns
+    ``Path.home() / <sub> / ...``, so assets are restored under the
+    current user's profile regardless of which machine made the backup.
+    Returns ``None`` if the path does not follow the
+    ``<drive>:\\Users\\<username>\\...`` pattern or is a UNC path.
+    """
+    if not _looks_like_windows_absolute_path(original_path):
+        return None
+    if original_path.startswith("\\\\"):
+        return None
+    pure = PureWindowsPath(original_path)
+    parts = pure.parts  # e.g. ('C:\\', 'Users', 'Valentin', 'Downloads', 'file.jpg')
+    if len(parts) < 4:
+        return None
+    if parts[1].lower() != "users":
+        return None
+    # parts[2] is the original username – skip it and map the rest to the current home
+    return Path.home().joinpath(*parts[3:])
+
+
 def _fallback_asset_path(original_path: str, restore_dir: Path) -> Path:
     """Compute a mirrored path under restore_dir for an asset that cannot use its original location."""
     if _looks_like_windows_absolute_path(original_path):
@@ -534,13 +557,18 @@ def _restore_external_assets_from_backup_root(backup_root: Path, restore_assets_
         if not src.exists() or not src.is_file():
             warn(f"Missing external asset in backup: {backup_path}")
             continue
+        remapped = _remap_windows_user_path(original_path)
         if _needs_repath(original_path):
-            dest = _fallback_asset_path(original_path, restore_assets_dir)
+            dest = remapped if remapped is not None else _fallback_asset_path(original_path, restore_assets_dir)
             path_mapping[original_path] = str(dest)
         else:
             dest = _target_path_from_manifest(original_path)
             if dest is None:
-                dest = _fallback_asset_path(original_path, restore_assets_dir)
+                dest = remapped if remapped is not None else _fallback_asset_path(original_path, restore_assets_dir)
+                path_mapping[original_path] = str(dest)
+            elif remapped is not None and remapped != dest:
+                # Same OS: if the backup came from a different user profile, remap to the current user's home
+                dest = remapped
                 path_mapping[original_path] = str(dest)
         try:
             ensure_parent(dest)
