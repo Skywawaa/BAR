@@ -235,6 +235,7 @@ pub fn iter_obs_files(
 // ─── OBS process detection / termination ─────────────────────────────────────
 
 /// Returns `true` if at least one OBS Studio process is currently running.
+#[allow(dead_code)]
 pub fn is_obs_running() -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -264,6 +265,7 @@ pub fn is_obs_running() -> bool {
 
 /// Kill all running OBS Studio processes.
 /// Returns the number of process names that were targeted.
+#[allow(dead_code)]
 pub fn kill_obs_processes() {
     #[cfg(target_os = "windows")]
     {
